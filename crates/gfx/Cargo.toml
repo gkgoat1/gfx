@@ -1,0 +1,21 @@
+[package]
+name = "gfx"
+description = "Sans-IO, no_std library for the git fast-export protocol, with optional builtins"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[features]
+default = []
+remap = ["dep:gfx-remap"]
+std = []
+# std + git subprocess drivers (integration testing / convenience; plan §9)
+git = ["std"]
+
+[dependencies]
+gfx-core = { workspace = true }
+gfx-remap = { workspace = true, optional = true }
+
+[dev-dependencies]
+gfx-remap = { workspace = true }

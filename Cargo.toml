@@ -1,6 +1,21 @@
 [workspace]
-members=[]
-resolver="3"
+resolver = "2"
+members = [
+    "crates/gfx-core",
+    "crates/gfx-hash",
+    "crates/gfx-remap",
+    "crates/gfx",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://example.invalid/gfx"
 
 [workspace.dependencies]
-
+bstr = { version = "1", default-features = false, features = ["alloc"] }
+gfx-core = { path = "crates/gfx-core" }
+gfx-hash = { path = "crates/gfx-hash" }
+gfx-remap = { path = "crates/gfx-remap" }

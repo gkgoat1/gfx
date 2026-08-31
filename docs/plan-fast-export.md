@@ -105,6 +105,13 @@ consumes to rebuild objects and refs at high speed. The grammar (from
   hash remapping tractable (§9).
 - **SHA-256 repos** exist: `feature object-format=sha256`; OIDs are 64 hex chars. The
   object format is stream state from the first `feature` line onward.
+- **`original-oid` on blobs** (verified against git): with `--show-original-ids`,
+  fast-export emits `original-oid` inside `blob` blocks too, not just commits/tags.
+- **Block framing** (verified byte-for-byte against git): fast-export emits exactly one
+  `\n` separator after each top-level command block (after the last `data` payload of a
+  blob; after the last file-op of a commit; after a tag's message; after a `reset` *that
+  carries a `from`* — a bare `reset` has none). Payloads keep their exact byte length;
+  the separator is not counted in `data <n>`.
 
 ### 3.3 Authoritative references
 
@@ -619,13 +626,15 @@ Everything under `git` is `std`-gated, test-oriented, and never required — the
 
 | Milestone | Deliverable | Acceptance |
 |---|---|---|
-| **M0** Scaffold | Workspace per §5.1; `Error`, `Limits`, `BString` conventions; `no_std` CI gate; git baseline doc | `x86_64-unknown-none` builds green, all crates |
-| **M1** Grammar core | `Event`, lenient `Parser` (blob/commit/reset/tag/data/marks/file-ops/progress/feature/option/done/original-oid), canonical `Writer` | P1/P2 on MVP subset; fixtures round-trip |
-| **M2** Full grammar | C-style path (un)quoting; `data delim`; `alias`/`get-mark`/`cat-blob`/`ls`; SHA-256; strict mode; limits; fuzz targets live | P7 green; full fixture corpus P2; strict-mode test suite |
-| **M3** Pipeline | `Transform`, `Pipeline`, test kit; facade crate with builder | P3; builtin test kit exercised by a toy builtin |
-| **M4** `gfx-remap` v1 (Mode A) | Mapping, parentage rewrite, `reset` tip fixes, `MarkFile` I/O, `CommitMap`/`RefMap`, identity-noop | P4/P5/P6; end-to-end git integration green (incl. SHA-256) |
-| **M5** Exporter | `Exporter` + options; `std` facade `git::export`/`git::import` | Byte-exact parity vs pinned git on corpus; remap composes on exporter output |
-| **M6** Stretch | Mode B in-process hashing (virtual tree builder + `Hasher`); `strip-signatures` builtin | Mode B map matches Mode A map on corpus |
+| Milestone | Deliverable | Acceptance | Status |
+|---|---|---|---|
+| **M0** Scaffold | Workspace per §5.1; `Error`, `Limits`, `BString` conventions; `no_std` CI gate; git baseline doc | `x86_64-unknown-none` builds green, all crates | ✅ done |
+| **M1** Grammar core | `Event`, lenient `Parser` (blob/commit/reset/tag/data/marks/file-ops/progress/feature/option/done/original-oid), canonical `Writer` | P1/P2 on MVP subset; fixtures round-trip | ✅ done |
+| **M2** Full grammar | C-style path (un)quoting; `data delim`; `alias`/`get-mark`/`cat-blob`/`ls`; SHA-256; strict mode; limits; fuzz targets live | P7 green; full fixture corpus P2; strict-mode test suite | ✅ done (fuzz targets pending) |
+| **M3** Pipeline | `Transform`, `Pipeline`, test kit; facade crate with builder | P3; builtin test kit exercised by a toy builtin | ✅ done |
+| **M4** `gfx-remap` v1 (Mode A) | Mapping, parentage rewrite, `reset` tip fixes, `MarkFile` I/O, `CommitMap`/`RefMap`, identity-noop | P4/P5/P6; end-to-end git integration green (incl. SHA-256) | ✅ core done; git-CI wiring pending |
+| **M5** Exporter | `Exporter` + options; `std` facade `git::export`/`git::import` | Byte-exact parity vs pinned git on corpus; remap composes on exporter output | pending (write-side parity already proven byte-exact vs live git on the smoke corpus) |
+| **M6** Stretch | Mode B in-process hashing (virtual tree builder + `Hasher`); `strip-signatures` builtin | Mode B map matches Mode A map on corpus | pending |
 
 MSRV/edition: edition 2024, MSRV **1.85** (documented; bumped only in M-milestone PRs).
 

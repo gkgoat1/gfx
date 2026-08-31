@@ -1,0 +1,15 @@
+[package]
+name = "gfx-core"
+description = "Sans-IO, no_std core for the git fast-export/fast-import stream protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+bstr = { workspace = true }
+
+[features]
+default = []
+# Public helpers for testing Transform implementations (builtins) and pipelines.
+test-kit = []
