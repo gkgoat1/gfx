@@ -953,7 +953,12 @@ impl LineReader {
     fn compact(&mut self) {
         if self.pos > 32 * 1024 && self.pos * 2 > self.buf.len() {
             self.buf.drain(..self.pos);
-            self.line_start -= self.pos;
+            // `line_start` may legitimately point before `pos` (it records
+            // the start of the last *taken line* for rewind, while data
+            // pumping can advance `pos` far past it). Clamp instead of
+            // underflowing; after the drain the stale rewind target is
+            // meaningless anyway, and the next take_line re-anchors it.
+            self.line_start = self.line_start.saturating_sub(self.pos);
             self.pos = 0;
         }
     }

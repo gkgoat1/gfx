@@ -72,6 +72,7 @@ version = "0.1.0"
 dependencies = [
  "gfx-core",
  "gfx-remap",
+ "gfx-strip-blobs",
 ]
 
 [[package]]
@@ -79,6 +80,7 @@ name = "gfx-cli"
 version = "0.1.0"
 dependencies = [
  "gfx",
+ "gfx-strip-blobs",
 ]
 
 [[package]]
@@ -99,6 +101,25 @@ dependencies = [
 
 [[package]]
 name = "gfx-remap"
+version = "0.1.0"
+dependencies = [
+ "bstr",
+ "gfx-cli",
+ "gfx-core",
+]
+
+[[package]]
+name = "gfx-strip-blobs"
+version = "0.1.0"
+dependencies = [
+ "bstr",
+ "gfx-cli",
+ "gfx-core",
+ "gfx-vindex",
+]
+
+[[package]]
+name = "gfx-vindex"
 version = "0.1.0"
 dependencies = [
  "bstr",

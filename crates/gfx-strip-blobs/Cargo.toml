@@ -1,0 +1,16 @@
+[package]
+name = "gfx-strip-blobs"
+description = "gfx builtin: retroactive removal of large/generated blobs from fast-export streams"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gfx-core = { workspace = true }
+gfx-vindex = { workspace = true }
+bstr = { workspace = true }
+
+[dev-dependencies]
+gfx-core = { workspace = true, features = ["test-kit"] }
+gfx-cli = { workspace = true }

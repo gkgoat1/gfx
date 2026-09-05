@@ -100,6 +100,9 @@ pub enum PassSpec {
     /// automatically when the user did not name it.
     #[cfg(feature = "remap")]
     Remap(gfx_remap::RemapConfig),
+    /// Builtin: retroactive removal of large/generated files (plan §5).
+    #[cfg(feature = "strip-blobs")]
+    StripBlobs(gfx_strip_blobs::StripBlobsConfig),
 }
 
 impl PassSpec {
@@ -107,6 +110,8 @@ impl PassSpec {
         match self {
             #[cfg(feature = "remap")]
             PassSpec::Remap(_) => "remap",
+            #[cfg(feature = "strip-blobs")]
+            PassSpec::StripBlobs(_) => "strip-blobs",
         }
     }
 
@@ -279,20 +284,26 @@ impl PassDriver {
         let input_len = input.len();
 
         // Stages in validated order: content passes feed the typed remap
-        // stage, which is always last (with_passes enforces the order; v1's
-        // only content passes arrive with `strip-blobs`, P2).
+        // stage, which is always last (with_passes enforces the order).
         let content = Pipeline::builder().build();
         #[cfg(feature = "remap")]
         let mut remap: Option<gfx_remap::Remap> = None;
+        #[cfg(feature = "strip-blobs")]
+        let mut strip: Option<gfx_strip_blobs::StripBlobs> = None;
         for p in &self.passes {
             match p {
                 #[cfg(feature = "remap")]
                 PassSpec::Remap(cfg) => remap = Some(gfx_remap::Remap::new(cfg.clone())),
+                #[cfg(feature = "strip-blobs")]
+                PassSpec::StripBlobs(cfg) => {
+                    strip = Some(gfx_strip_blobs::StripBlobs::new(cfg.clone()))
+                }
             }
         }
         let mut content = content;
 
-        // Parse → content pipeline → remap stage → canonical bytes.
+        // Parse → content stages (strip first, then the custom pipeline) →
+        // remap stage → canonical bytes.
         let mut parser = Parser::new(ParseOptions::default());
         parser.feed(&input);
         let mut events = Vec::new();
@@ -305,6 +316,16 @@ impl PassDriver {
             content.apply(ev, &mut events)?;
         }
         content.finish(&mut events)?;
+
+        #[cfg(feature = "strip-blobs")]
+        if let Some(s) = strip.as_mut() {
+            let mut next = Vec::new();
+            for ev in events.drain(..) {
+                s.apply(ev, &mut next)?;
+            }
+            s.finish(&mut next)?;
+            events = next;
+        }
 
         #[cfg(feature = "remap")]
         if let Some(r) = remap.as_mut() {
@@ -337,6 +358,13 @@ impl PassDriver {
         };
 
         // Per-pass summaries + pre-finalization map.
+        #[cfg(feature = "strip-blobs")]
+        if let Some(s) = strip.as_ref() {
+            report.passes.push(PassSummary {
+                name: "strip-blobs",
+                detail: s.report().summary_text(),
+            });
+        }
         #[cfg(feature = "remap")]
         if let Some(r) = remap.as_ref() {
             let st = r.stats();

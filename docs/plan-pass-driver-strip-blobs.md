@@ -423,6 +423,14 @@ parser safety; the strip pass's own threshold is orthogonal and may exceed it
 - Commits whose only change was a stripped file still occur (no pruning in v1,
   §2); they become empty-parent-diff commits and are rewritten like any other.
   Their `original-oid` linkage keeps the commit-map meaningful.
+- **Implementation note (canonical digest in v1):** remap currently detects
+  rewritten commits via `original-oid` presence and host flagging only — the
+  plan-§7 digest computation is an M4/M6 follow-up. Content passes that
+  rewrite the stream but leave `original-oid` lines intact therefore report
+  `commits_rewritten=0` even though every downstream commit gets a new hash
+  (the round-trip still produces correct trees/refs; only the map's
+  rewritten bookkeeping lags until the digest lands). The driver's ref-map
+  — a full before/after ref snapshot — is authoritative for what moved.
 - Because v1 does not prune, no `from` rewiring occurs here; parentage rewrite
   is remap's job alone. The deferred `prune_empty` (§6, Deferred item 1) is what will need
   ancestor-walking — deliberately not smuggled into this pass.

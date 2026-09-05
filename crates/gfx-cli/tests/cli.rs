@@ -99,12 +99,14 @@ fn factory_builds_config_from_flags() {
     let passes = reg.resolve("remap", &map).unwrap();
     match &passes[0] {
         PassSpec::Remap(cfg) => assert!(cfg.track_message_oids),
+        other => panic!("expected remap, got {other:?}"),
     }
 
     let map2 = parse_argv(&specs, &os(&[])).unwrap();
     let passes2 = reg.resolve("remap", &map2).unwrap();
     match &passes2[0] {
         PassSpec::Remap(cfg) => assert!(!cfg.track_message_oids),
+        other => panic!("expected remap, got {other:?}"),
     }
 }
 
@@ -120,7 +122,6 @@ fn usage_lists_every_declared_flag() {
 
 #[test]
 fn cli_end_to_end_dry_run_help_and_errors() {
-    let reg = registry();
     // --help exits 0, prints usage
     let mut out = Vec::new();
     let code = gfx_cli::run_rewrite_cli_to(

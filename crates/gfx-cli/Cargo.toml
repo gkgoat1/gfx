@@ -7,7 +7,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-gfx = { workspace = true, features = ["std", "git", "remap"] }
+gfx = { workspace = true, features = ["std", "git", "remap", "strip-blobs"] }
+gfx-strip-blobs = { workspace = true }
 
 [dev-dependencies]
 # none: the CLI library hand-rolls its arg parsing to stay dependency-light

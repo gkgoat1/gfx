@@ -14,6 +14,9 @@ pub use gfx_core as core;
 #[cfg(feature = "remap")]
 pub use gfx_remap;
 
+#[cfg(feature = "strip-blobs")]
+pub use gfx_strip_blobs;
+
 /// Everything a host typically needs.
 pub mod prelude {
     pub use gfx_core::{
