@@ -106,8 +106,7 @@ pub mod sha1_impl {
 
         fn finalize_reset(&mut self) -> Vec<u8> {
             use sha1::Digest;
-            let out = self.0.finalize_reset().to_vec();
-            out
+            self.0.finalize_reset().to_vec()
         }
 
         fn digest_len(&self) -> usize {

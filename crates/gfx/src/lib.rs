@@ -26,5 +26,8 @@ pub mod prelude {
 #[cfg(feature = "std")]
 pub mod git;
 
+#[cfg(feature = "git")]
+pub mod driver;
+
 #[cfg(feature = "std")]
 pub use git::rewrite;

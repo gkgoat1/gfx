@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/gfx-cli",
     "crates/gfx-core",
     "crates/gfx-hash",
     "crates/gfx-remap",
@@ -17,5 +18,7 @@ repository = "https://example.invalid/gfx"
 [workspace.dependencies]
 bstr = { version = "1", default-features = false, features = ["alloc"] }
 gfx-core = { path = "crates/gfx-core" }
+gfx = { path = "crates/gfx" }
 gfx-hash = { path = "crates/gfx-hash" }
 gfx-remap = { path = "crates/gfx-remap" }
+gfx-cli = { path = "crates/gfx-cli" }

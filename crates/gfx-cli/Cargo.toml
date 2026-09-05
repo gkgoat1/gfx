@@ -1,0 +1,13 @@
+[package]
+name = "gfx-cli"
+description = "gfx pass-driver CLI library: pass registry, arg model, rewrite_binary! macro"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gfx = { workspace = true, features = ["std", "git", "remap"] }
+
+[dev-dependencies]
+# none: the CLI library hand-rolls its arg parsing to stay dependency-light

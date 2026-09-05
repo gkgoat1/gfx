@@ -75,6 +75,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "gfx-cli"
+version = "0.1.0"
+dependencies = [
+ "gfx",
+]
+
+[[package]]
 name = "gfx-core"
 version = "0.1.0"
 dependencies = [
