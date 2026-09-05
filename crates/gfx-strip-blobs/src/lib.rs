@@ -97,8 +97,7 @@ pub enum Reason {
 }
 
 impl Reason {
-    #[allow(dead_code)]
-    fn describe(&self) -> String {
+    pub(crate) fn describe(&self) -> String {
         match self {
             Reason::Size { bytes } => format!("size>{bytes}"),
             Reason::PathGlob { glob } => {
@@ -206,6 +205,32 @@ impl StripReport {
             self.totals.divergences,
             self.totals.now_empty_commits
         )
+    }
+
+    /// Full deterministic listing (artifact format, plan §7 P3): totals,
+    /// then one line per recorded entry, sorted as emitted.
+    pub fn to_text(&self) -> String {
+        let mut s = String::new();
+        s.push_str("strip-blobs report\n");
+        s.push_str(&self.summary_text());
+        s.push('\n');
+        if self.truncated {
+            s.push_str(&format!(
+                "listing truncated at {} entries (totals exact)\n",
+                self.entries.len()
+            ));
+        }
+        for e in &self.entries {
+            s.push_str(&format!(
+                "{} {}{} {} {}\n",
+                String::from_utf8_lossy(e.ref_name.as_slice()),
+                String::from_utf8_lossy(e.path.as_slice()),
+                if e.divergent { " (divergent)" } else { "" },
+                e.reason.describe(),
+                e.bytes
+            ));
+        }
+        s
     }
 }
 

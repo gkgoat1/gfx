@@ -9,6 +9,5 @@ license.workspace = true
 [dependencies]
 gfx = { workspace = true, features = ["std", "git", "remap", "strip-blobs"] }
 gfx-strip-blobs = { workspace = true }
+toml = { version = "0.8", features = ["parse"] }
 
-[dev-dependencies]
-# none: the CLI library hand-rolls its arg parsing to stay dependency-light

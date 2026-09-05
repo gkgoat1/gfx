@@ -2,10 +2,10 @@
 
 | Field    | Value |
 |----------|-------|
-| Status   | Draft — pre-implementation |
+| Status   | Implemented (P0–P3) |
 | Scope    | `filter-repo`-style multi-pass invocation (host driver) + builtin: retroactive removal of large / generated files |
 | Depends  | plan-fast-export.md §5 (architecture), §6 (builtin framework), §7 (`gfx-remap`), §9 (facade) |
-| Updated  | 2025-08-31 |
+| Updated  | 2025-08-31 (implemented — see [rewrite-cli.md](rewrite-cli.md) for the user-facing surface) |
 
 ---
 
@@ -492,10 +492,10 @@ must pass) plus `test_kit`-driven golden streams for §5.6.
 
 | Milestone | Deliverable | Acceptance |
 |---|---|---|
-| **P0** Pass-driver core | `gfx-cli` library (registry, arg model, safety) + `rewrite_binary!` macro; default `gfx` binary; `gfx::driver::PassDriver`; one-round export→identity-pipeline→import; artifacts | A1, A2, A4, A6, A7 |
-| **P1** Virtual index + strip builtin | `gfx-vindex` crate (replay + simulator harness); `gfx-strip-blobs` crate; size + glob predicates; drop-semantics decisions; report; helper binary `examples/strip-blobs.rs` | S1, S3, S4, S7; contract kit green |
-| **P2** Composition | strip+remap end-to-end via CLI; content signals; protect globs; edge-case fixtures | A3, A5, S2, S5, S6 |
-| **P3** Polish | `--config` TOML surface, report formatting, docs; fuzz target for the glob matcher | fuzz smoke green; docs complete |
+| **P0** Pass-driver core | `gfx-cli` library (registry, arg model, safety) + `rewrite_binary!` macro; default `gfx` binary; `gfx::driver::PassDriver`; one-round export→identity-pipeline→import; artifacts | A1, A2, A4, A6, A7 — ✅ done |
+| **P1** Virtual index + strip builtin | `gfx-vindex` crate (replay + simulator harness); `gfx-strip-blobs` crate; size + glob predicates; drop-semantics decisions; report; helper binary `examples/strip-blobs.rs` | S1, S3, S4, S7; contract kit green — ✅ done |
+| **P2** Composition | strip+remap end-to-end via CLI; content signals; protect globs; edge-case fixtures | A3, A5, S2, S5, S6 — ✅ done |
+| **P3** Polish | `--config` TOML surface, report formatting (`strip-report.txt` artifact), fuzz targets (`fuzz/glob_match`, `fuzz/strip_roundtrip` + in-crate smoke), docs | fuzz smoke green; docs complete — ✅ done |
 
 ---
 

@@ -290,6 +290,8 @@ impl PassDriver {
         let mut remap: Option<gfx_remap::Remap> = None;
         #[cfg(feature = "strip-blobs")]
         let mut strip: Option<gfx_strip_blobs::StripBlobs> = None;
+        #[cfg(feature = "strip-blobs")]
+        let mut strip_report: Option<gfx_strip_blobs::StripReport> = None;
         for p in &self.passes {
             match p {
                 #[cfg(feature = "remap")]
@@ -325,6 +327,7 @@ impl PassDriver {
             }
             s.finish(&mut next)?;
             events = next;
+            strip_report = Some(s.report().clone());
         }
 
         #[cfg(feature = "remap")]
@@ -418,6 +421,10 @@ impl PassDriver {
 
         // Artifacts (plan §4.3). Deterministic contents (A6).
         write_artifacts(&gfx_dir, &report)?;
+        #[cfg(feature = "strip-blobs")]
+        if let Some(sr) = strip_report.as_ref() {
+            std::fs::write(gfx_dir.join("strip-report.txt"), sr.to_text())?;
+        }
         report.artifacts_dir = Some(gfx_dir);
         Ok(report)
     }

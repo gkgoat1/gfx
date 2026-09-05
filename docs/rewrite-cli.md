@@ -1,0 +1,156 @@
+# `gfx rewrite` — CLI guide
+
+`gfx` is a `git filter-repo`-style history rewriter: it names a sequence of
+passes, runs one round of `git fast-export` → passes → `git fast-import`,
+and writes `commit-map` / `ref-map` / run-report artifacts — the same
+invocation shape as filter-repo, with explicit, user-ordered passes and
+remap always composing last.
+
+Design + rationale: [`plan-pass-driver-strip-blobs.md`](plan-pass-driver-strip-blobs.md)
+(decisions D1–D4). This file is the user-facing surface.
+
+## Installation / binaries
+
+```
+cargo build --release
+target/release/gfx                    # all passes: strip-blobs, remap
+target/release/examples/strip-blobs   # single-pass helper (flat flags)
+target/release/examples/remap         # single-pass helper (flat flags)
+```
+
+Build the helpers with `cargo build --release --examples`.
+
+## Safety model
+
+- Bare repositories pass the safety check.
+- Non-bare repositories are refused without `--force` (use a fresh
+  `git clone --bare`).
+- `--dry-run` runs export → passes → report and touches nothing: no
+  import, no ref changes, no artifacts.
+- Pass-order violations (`--passes remap,strip-blobs`) are usage errors
+  validated **before** the repository is touched.
+
+## Basic usage
+
+```
+# Dry-run: what would change?
+gfx --repo my-repo.git --dry-run \
+    --strip-blobs.larger-than 100K \
+    --strip-blobs.content-signals
+
+# Rewrite in place (bare repo).
+gfx --repo my-repo.git \
+    --strip-blobs.larger-than 100K \
+    --strip-blobs.path-glob '**/*.min.js' \
+    --strip-blobs.protect-glob '**/keep/**'
+```
+
+Afterwards, optionally reclaim space (printed as advice, never run for
+you):
+
+```
+git -C my-repo.git reflog expire --expire=now --all && git -C my-repo.git gc --prune=now
+```
+
+## Flags
+
+Global:
+
+| Flag | Meaning |
+|---|---|
+| `--repo <path>` | repository to rewrite (default `.`) |
+| `--passes <spec>` | comma-separated pass names in pipeline order (default `strip-blobs,remap`) |
+| `--force` | override the safety check |
+| `--dry-run` | no import, no ref changes, no artifacts |
+| `--config <file>` | TOML flag defaults; CLI flags win (below) |
+| `--help` | generated usage from the pass registry |
+
+Pass flags are namespaced in composed binaries and flat in single-pass
+helpers; the flat form is accepted in composed binaries when unambiguous.
+
+### strip-blobs
+
+| Flag | Meaning |
+|---|---|
+| `--strip-blobs.larger-than <size>` | strip blobs strictly larger than this (`512K`, `1M`, bytes) |
+| `--strip-blobs.path-glob <glob>` | strip paths matching the glob (repeatable; `**` doublestar, byte-exact) |
+| `--strip-blobs.protect-glob <glob>` | never strip matching paths (repeatable; defaults protect `**/.gitattributes`, `**/.gitignore`, `**/.gitmodules`) |
+| `--strip-blobs.content-signals` | enable generated-content signals (off by default at the CLI; on by default in the library) |
+| `--strip-blobs.strip-symlinks-too` | also judge symlink payloads |
+
+Semantics (decision D1): the pass **drops** selected ops and never
+synthesizes counter-ops. Consequences, deliberately chosen and reported:
+
+- Removing an `M` that changed path `P` makes `P` revert to its last
+  surviving content under **blob selection**; path selection never reverts.
+- Copies/renames of selected content are dropped; each divergence is a
+  report entry.
+- Deletes of paths erased by the pass itself are normalized away.
+- Commits left with zero surviving ops are **kept** (no `--prune-empty`
+  in v1) and counted in the report.
+
+### remap
+
+| Flag | Meaning |
+|---|---|
+| `--remap.track-message-oids` | harvest old OIDs referenced in commit messages |
+
+Remap runs last (enforced; naming it earlier is an error). It tracks the
+old→new commit mapping; `commit-map` is finalized from fast-import's
+exported marks after the round. In v1, remap flags rewritten commits via
+`original-oid` bookkeeping — see the implementation note in
+[plan §5.5](plan-pass-driver-strip-blobs.md).
+
+## Config file
+
+```toml
+# gfx-rewrite.toml — table name is the pass, keys are flat flag names.
+[strip-blobs]
+larger-than = "1M"
+path-glob = ["**/Cargo.lock", "*.min.js"]
+content-signals = true
+
+[remap]
+track-message-oids = false
+```
+
+`gfx --repo my-repo.git --config gfx-rewrite.toml` — CLI flags override
+file values; unknown passes or flags in the file are usage errors.
+
+## Artifacts
+
+After a successful round, `<gitdir>/gfx/` contains:
+
+| File | Content |
+|---|---|
+| `commit-map` | `old-oid new-oid` per line (post-finalization) |
+| `ref-map` | `old-tip new-tip refname` (full before/after snapshot) |
+| `run-report.txt` | pass summaries, byte counts, identity flag |
+| `strip-report.txt` | strip totals + bounded per-op listing (`(divergent)` marks D1 divergences) |
+
+Artifacts are deterministic: identical runs on clones of the same source
+produce byte-identical files.
+
+## Custom binaries
+
+`gfx-cli` is a library: wrap any pass subset into a purpose-built binary
+(plan §4.2, decision D4):
+
+```rust
+gfx_cli::rewrite_binary! {
+    binary: "my-rewriter",
+    about: "strip vendor blobs and remap",
+    passes: [gfx_cli::passes::strip_blobs_factory(), gfx_cli::passes::remap_factory()],
+}
+```
+
+Each pass crate also ships an example helper binary built exactly this
+way (`examples/strip-blobs.rs`, `examples/remap.rs`).
+
+## Known v1 limitations
+
+- Buffered rounds: the export stream and event list live in memory.
+- Empty branches (refs with no commits) are dropped by the round-trip.
+- No `--prune-empty`, no `--replace-refs`, no partial-history
+  (`--refs`) rewriting, no message-hash rewriting yet — see the plan's
+  Deferred section.

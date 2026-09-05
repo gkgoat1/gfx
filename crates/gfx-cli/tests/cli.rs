@@ -205,6 +205,71 @@ fn strip_flags_reach_the_pass_through_the_cli() {
 }
 
 #[test]
+fn config_file_supplies_flags_cli_wins() {
+    let dir = std::env::temp_dir().join(format!("gfx-cli-cfg-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg = dir.join("gfx-rewrite.toml");
+    std::fs::write(
+        &cfg,
+        r#"
+[strip-blobs]
+larger-than = "2M"
+path-glob = ["**/Cargo.lock", "*.min.js"]
+content-signals = true
+
+[remap]
+track-message-oids = true
+"#,
+    )
+    .unwrap();
+
+    // Config alone → unknown pass in file is an error.
+    let bad = dir.join("bad.toml");
+    std::fs::write(&bad, "[nope]
+x = 1
+").unwrap();
+    let mut out = Vec::new();
+    let code = gfx_cli::run_rewrite_cli_to(
+        &mut out,
+        "test-gfx",
+        "about",
+        vec![remap_factory()],
+        os(&["--repo", "/definitely/not/a/repo", "--config", bad.to_str().unwrap()]),
+    );
+    assert_eq!(code, gfx_cli::EXIT_USAGE, "bad config pass name is a usage error");
+
+    // Unknown flag in a known pass table is also an error.
+    let bad2 = dir.join("bad2.toml");
+    std::fs::write(&bad2, "[remap]
+no-such-flag = true
+").unwrap();
+    let mut out = Vec::new();
+    let code = gfx_cli::run_rewrite_cli_to(
+        &mut out,
+        "test-gfx",
+        "about",
+        vec![remap_factory()],
+        os(&["--repo", "/definitely/not/a/repo", "--config", bad2.to_str().unwrap()]),
+    );
+    assert_eq!(code, gfx_cli::EXIT_USAGE, "bad config flag name is a usage error");
+
+    // Valid config parses (fails later at the repo check — which is also a
+    // usage-domain failure here, EXIT_USAGE, not a driver failure).
+    let mut out = Vec::new();
+    let code = gfx_cli::run_rewrite_cli_to(
+        &mut out,
+        "test-gfx",
+        "about",
+        vec![remap_factory()],
+        os(&["--repo", "/definitely/not/a/repo", "--config", cfg.to_str().unwrap()]),
+    );
+    assert_eq!(code, gfx_cli::EXIT_USAGE);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn arg_kinds_are_distinct() {
     assert_ne!(ArgKind::Flag, ArgKind::Value);
     assert_ne!(ArgKind::Value, ArgKind::Size);

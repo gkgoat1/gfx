@@ -14,6 +14,7 @@ extern crate std;
 
 pub mod args;
 pub mod cli;
+pub mod config;
 pub mod error;
 pub mod passes;
 pub mod registry;

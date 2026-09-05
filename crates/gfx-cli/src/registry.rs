@@ -74,6 +74,14 @@ impl PassRegistry {
         self.factories.iter().map(|f| f.name()).collect()
     }
 
+    /// A pass's declared flags (name, kind), for config-file validation.
+    pub fn flag_kinds(&self, pass: &str) -> Option<Vec<(&'static str, crate::args::ArgKind)>> {
+        self.factories
+            .iter()
+            .find(|f| f.name() == pass)
+            .map(|f| f.arg_spec().into_iter().map(|s| (s.flag, s.kind)).collect())
+    }
+
     /// The default `--passes` value: every registered pass, in registry
     /// order (factories are expected to be listed in valid pipeline order —
     /// content passes first, remap last).

@@ -1,0 +1,30 @@
+[package]
+name = "gfx-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+gfx-strip-blobs = { path = "../crates/gfx-strip-blobs" }
+gfx-core = { path = "../crates/gfx-core" }
+
+[[bin]]
+name = "glob_match"
+path = "fuzz_targets/glob_match.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "strip_roundtrip"
+path = "fuzz_targets/strip_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+# Standalone: cargo-fuzz convention; excluded from the main workspace.
+[workspace]

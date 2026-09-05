@@ -28,6 +28,11 @@ pub fn global_args() -> Vec<ArgSpec> {
             None,
             "comma-separated pass names, pipeline order (default: registry order)",
         ),
+        ArgSpec::value(
+            "config",
+            None,
+            "TOML config file with pass flag defaults (CLI flags override)",
+        ),
         ArgSpec::flag("help", "print this help and exit"),
     ]
 }
@@ -57,7 +62,8 @@ pub fn run_rewrite_cli_to(
                 | CliError::BadSize { .. }
                 | CliError::UnexpectedPositional(_)
                 | CliError::UnknownPass { .. }
-                | CliError::PassOrder(_) => EXIT_USAGE,
+                | CliError::PassOrder(_)
+                | CliError::BadConfig { .. } => EXIT_USAGE,
                 _ => EXIT_FAILURE,
             }
         }
@@ -76,12 +82,16 @@ fn try_run(
     let specs = registry.all_args(&globals);
     let argv: Vec<OsString> = argv.into_iter().collect();
 
-    let map = parse_argv(&specs, &argv)?;
+    let mut map = parse_argv(&specs, &argv)?;
 
     if map.flag("help") {
         write!(out, "{}", registry.usage(binary, about, &globals))
             .map_err(CliError::Io)?;
         return Ok(EXIT_OK);
+    }
+
+    if let Some(cfg_path) = map.value("config").map(str::to_string) {
+        crate::config::apply_config_file(&registry, std::path::Path::new(&cfg_path), &mut map)?;
     }
 
     let passes_spec = map

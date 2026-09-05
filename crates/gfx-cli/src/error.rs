@@ -37,6 +37,8 @@ pub enum CliError {
     Driver(DriverError),
     /// Artifact/report writing failure.
     Io(std::io::Error),
+    /// The `--config` file is malformed or references unknown passes/flags.
+    BadConfig { file: String, msg: String },
 }
 
 impl fmt::Display for CliError {
@@ -63,6 +65,7 @@ impl fmt::Display for CliError {
             CliError::PassOrder(msg) => write!(f, "{msg}"),
             CliError::Driver(e) => write!(f, "{e}"),
             CliError::Io(e) => write!(f, "i/o error: {e}"),
+            CliError::BadConfig { file, msg } => write!(f, "bad config file {file}: {msg}"),
         }
     }
 }

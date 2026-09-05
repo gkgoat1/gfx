@@ -129,12 +129,12 @@ impl ArgMap {
         }
     }
 
-    fn put(&mut self, key: &str, value: String) {
+    pub(crate) fn put(&mut self, key: &str, value: String) {
         self.values.entry(key.to_string()).or_default().push(value);
         self.present.insert(key.to_string());
     }
 
-    fn mark(&mut self, key: &str) {
+    pub(crate) fn mark_present(&mut self, key: &str) {
         self.present.insert(key.to_string());
     }
 }
@@ -208,7 +208,7 @@ pub fn parse_argv(specs: &[CliArg], argv: &[std::ffi::OsString]) -> Result<ArgMa
                         flag: format!("{} (boolean flag takes no value)", arg.key),
                     });
                 }
-                map.mark(&arg.key);
+                map.mark_present(&arg.key);
             }
             ArgKind::Value | ArgKind::Size => {
                 let v = match inline {
