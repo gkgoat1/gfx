@@ -90,6 +90,23 @@ fn try_run(
         .unwrap_or_else(|| registry.default_spec());
     let passes = registry.resolve(&passes_spec, &map)?;
 
+    // Validate ordering *before* touching the repository (A4: bad pass
+    // configuration is a usage error with no side effects).
+    let mut remap_seen = false;
+    for (i, p) in passes.iter().enumerate() {
+        if p.is_remap() {
+            if remap_seen {
+                return Err(CliError::PassOrder("remap named more than once".into()));
+            }
+            if i + 1 != passes.len() {
+                return Err(CliError::PassOrder(
+                    "remap must be the last pass (content passes must precede it)".into(),
+                ));
+            }
+            remap_seen = true;
+        }
+    }
+
     let mut driver = PassDriver::new(std::path::Path::new(map.value("repo").unwrap_or(".")))?
         .with_passes(passes)?
         .force(map.flag("force"));

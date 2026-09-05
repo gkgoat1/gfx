@@ -115,7 +115,7 @@ impl PassSpec {
         }
     }
 
-    fn is_remap(&self) -> bool {
+    pub fn is_remap(&self) -> bool {
         #[cfg(feature = "remap")]
         {
             matches!(self, PassSpec::Remap(_))

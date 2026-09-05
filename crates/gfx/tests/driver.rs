@@ -255,6 +255,32 @@ fn a3_strip_and_remap_end_to_end() {
 }
 
 #[test]
+fn a5_sha256_repo_end_to_end() {
+    // A5: the identity round on a SHA-256 repository.
+    let base = tmpdir("a5");
+    let work = base.join("work");
+    let bare = base.join("bare.git");
+    std::fs::create_dir_all(&work).unwrap();
+    git(&base, &["init", "-q", "--object-format=sha256", "work"]);
+    std::fs::write(work.join("a.txt"), b"hello sha256\n").unwrap();
+    git(&work, &["add", "."]);
+    git(&work, &["commit", "-qm", "one"]);
+    git(&base, &["clone", "-q", "--bare", "work", "bare.git"]);
+    let _ = std::fs::remove_dir_all(&work);
+
+    let head_before = String::from_utf8(git(&bare, &["rev-parse", "HEAD"])).unwrap();
+    let mut d = PassDriver::new(&bare).unwrap().with_passes(vec![]).unwrap();
+    let report = d.run().unwrap();
+    assert!(report.identity, "sha256 identity round must be byte-identical");
+    assert_eq!(
+        String::from_utf8(git(&bare, &["rev-parse", "HEAD"])).unwrap(),
+        head_before
+    );
+    assert_eq!(head_before.trim().len(), 64, "fixture really is sha256");
+    gfx::git::process::fsck(&bare).expect("fsck --strict");
+}
+
+#[test]
 fn empty_branch_is_dropped_like_filter_repo() {
     // A ref with no commits exports as a bare `reset`; the round drops it —
     // the documented v1 limitation matching filter-repo's empty-ref pruning.

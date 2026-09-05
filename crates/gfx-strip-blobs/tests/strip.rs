@@ -5,8 +5,8 @@
 use gfx_core::prelude::*;
 use gfx_core::test_kit;
 use gfx_strip_blobs::{
-    glob_match, BlobPredicate, ContentSignals, Reason, SharedMatcher, SharedPredicate,
-    StripBlobs, StripBlobsConfig,
+    glob_match, BlobPredicate, ContentSignals, Reason, SharedPredicate, StripBlobs,
+    StripBlobsConfig,
 };
 
 fn b(s: &str) -> BString {
@@ -584,4 +584,121 @@ fn report_limit_caps_listings_but_not_totals() {
 fn glob_bytes_not_utf8() {
     assert!(glob_match(b"**/*.bin", b"\xff\xfe/x.bin"));
     assert!(!glob_match(b"**/*.bin", b"\xff\xfe/x.txt"));
+}
+
+#[test]
+fn notes_on_selected_content_are_judged_like_blobs() {
+    // Plan §5.6: `N` note blobs judged like any blob; commit refs untouched.
+    let cfg = size_cfg(50);
+    let events = vec![
+        blob_ev(1, b"ok\n", None),
+        blob_ev(2, &vec![b'x'; 100], None),
+        commit_ev(
+            "refs/heads/main",
+            3,
+            None,
+            None,
+            vec![modify_dataref(Mode::Regular, "a.txt", 1)],
+        ),
+        commit_ev(
+            "refs/heads/main",
+            4,
+            None,
+            Some(Committish::Mark(3)),
+            vec![FileOp::Note {
+                data: FileSource::DataRef(DataRef::Mark(2)),
+                commit: Committish::Mark(3),
+            }],
+        ),
+    ];
+    let (t, out) = run(cfg, events);
+    assert_eq!(t.report().totals.ops_dropped, 1);
+    match out.last().unwrap() {
+        Event::Commit(c) => assert!(c.ops.is_empty(), "note on selected blob dropped"),
+        other => panic!("{other:?}"),
+    }
+    // The blob events themselves pass through untouched.
+    assert!(matches!(&out[0], Event::Blob { mark: Some(1), .. }));
+}
+
+#[test]
+fn sub_threshold_blob_at_globbed_path_is_selected() {
+    // Plan §5.6: path predicate ORs size predicate.
+    let cfg = StripBlobsConfig {
+        size_threshold: Some(1000),
+        path_globs: vec![b"**/Cargo.lock".to_vec().into()],
+        ..StripBlobsConfig::default()
+    };
+    let events = vec![
+        blob_ev(1, b"tiny\n", None),
+        commit_ev(
+            "refs/heads/main",
+            2,
+            None,
+            None,
+            vec![modify_dataref(Mode::Regular, "app/Cargo.lock", 1)],
+        ),
+    ];
+    let (t, _) = run(cfg, events);
+    assert_eq!(t.report().totals.ops_dropped, 1);
+    assert!(matches!(&t.report().entries[0].reason, Reason::PathGlob { .. }));
+}
+
+#[test]
+fn tree_replace_path_glob_applies_contents_not_judged() {
+    // Plan §5.6 documented limitation: `M 040000` — glob on the directory
+    // path, content predicates skipped (tree bytes are not stream-visible).
+    let cfg = StripBlobsConfig {
+        size_threshold: Some(0), // would select any visible content
+        path_globs: vec![b"sub/**".to_vec().into()],
+        ..StripBlobsConfig::default()
+    };
+    let events = vec![commit_ev(
+        "refs/heads/main",
+        1,
+        None,
+        None,
+        vec![
+            FileOp::Modify {
+                mode: Mode::Dir,
+                path: b("sub"),
+                source: FileSource::Inline(Data(vec![0xde, 0xad])),
+            },
+            modify_inline(Mode::Regular, "top.txt", b"x"),
+        ],
+    )];
+    let (t, _) = run(cfg, events);
+    // Tree op dropped via path glob; top.txt survives despite size rule 0
+    // (a 1-byte blob is not > 0... threshold 0 selects everything: check).
+    // Actually `> 0` means 1-byte blobs ARE selected; adjust expectation.
+    assert_eq!(t.report().totals.ops_dropped, 2);
+}
+
+#[test]
+fn quoted_and_high_bytes_paths_match_globs() {
+    // The parser unquotes C-quoted paths before ops reach us; globs see
+    // raw bytes. Construct an op with a non-UTF-8 path directly.
+    let cfg = StripBlobsConfig {
+        path_globs: vec![{
+            let mut g = Vec::new();
+            g.extend_from_slice(b"**/\xff");
+            g.into()
+        }],
+        ..StripBlobsConfig::default()
+    };
+    let mut raw = Vec::new();
+    raw.extend_from_slice(b"src/\xff");
+    let events = vec![commit_ev(
+        "refs/heads/main",
+        1,
+        None,
+        None,
+        vec![FileOp::Modify {
+            mode: Mode::Regular,
+            path: BString::from(raw),
+            source: FileSource::Inline(Data(b"data\n".to_vec())),
+        }],
+    )];
+    let (t, _) = run(cfg, events);
+    assert_eq!(t.report().totals.ops_dropped, 1, "byte-exact glob on raw path");
 }

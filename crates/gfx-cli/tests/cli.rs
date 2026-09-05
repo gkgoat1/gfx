@@ -158,6 +158,53 @@ fn cli_end_to_end_dry_run_help_and_errors() {
 }
 
 #[test]
+fn composed_registry_defaults_to_strip_then_remap() {
+    let reg = PassRegistry::new(vec![
+        gfx_cli::passes::strip_blobs_factory(),
+        gfx_cli::passes::remap_factory(),
+    ])
+    .unwrap();
+    assert_eq!(reg.default_spec(), "strip-blobs,remap");
+    let specs = reg.all_args(&gfx_cli::cli::global_args());
+    let map = parse_argv(&specs, &os(&[])).unwrap();
+    let passes = reg.resolve(&reg.default_spec(), &map).unwrap();
+    assert_eq!(passes.len(), 2);
+    assert_eq!(passes[0].name(), "strip-blobs");
+    assert_eq!(passes[1].name(), "remap");
+
+    // Wrong order through the CLI → usage error (A4).
+    let mut out = Vec::new();
+    let code = gfx_cli::run_rewrite_cli_to(
+        &mut out,
+        "test-gfx",
+        "about",
+        vec![
+            gfx_cli::passes::strip_blobs_factory(),
+            gfx_cli::passes::remap_factory(),
+        ],
+        os(&["--repo", "/tmp", "--passes", "remap,strip-blobs"]),
+    );
+    assert_eq!(code, gfx_cli::EXIT_USAGE);
+}
+
+#[test]
+fn strip_flags_reach_the_pass_through_the_cli() {
+    let mut out = Vec::new();
+    let code = gfx_cli::run_rewrite_cli_to(
+        &mut out,
+        "test-gfx",
+        "about",
+        vec![
+            gfx_cli::passes::strip_blobs_factory(),
+            gfx_cli::passes::remap_factory(),
+        ],
+        os(&["--repo", "/definitely/not/a/repo", "--dry-run", "--strip-blobs.larger-than", "1M", "--strip-blobs.path-glob", "**/Cargo.lock"]),
+    );
+    // Fails at the repo check, not at flag parsing — flags were accepted.
+    assert_eq!(code, gfx_cli::EXIT_FAILURE);
+}
+
+#[test]
 fn arg_kinds_are_distinct() {
     assert_ne!(ArgKind::Flag, ArgKind::Value);
     assert_ne!(ArgKind::Value, ArgKind::Size);

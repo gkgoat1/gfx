@@ -511,7 +511,40 @@ impl gfx_core::Transform for StripBlobs {
                                 }
                             }
                         }
-                        FileOp::DeleteAll | FileOp::Note { .. } => {}
+                        FileOp::DeleteAll => {}
+                        FileOp::Note { data, commit: _ } => {
+                            // Note blobs are judged like any blob (§5.6);
+                            // the note's commit ref is untouched.
+                            match data {
+                                FileSource::Inline(d) => {
+                                    if let Some(reason) = self.content_selected(None, d.as_slice()) {
+                                        drop = Some((reason, d.len() as u64, false));
+                                    }
+                                }
+                                FileSource::DataRef(DataRef::Mark(m)) => {
+                                    if self
+                                        .registry
+                                        .get(&BlobId::Mark(*m))
+                                        .map(|v| v.selected)
+                                        .unwrap_or(false)
+                                    {
+                                        let v = &self.registry[&BlobId::Mark(*m)];
+                                        drop = Some((v.reason.clone(), v.size, false));
+                                    }
+                                }
+                                FileSource::DataRef(DataRef::Oid(oid)) => {
+                                    if self
+                                        .registry
+                                        .get(&BlobId::Oid(*oid))
+                                        .map(|v| v.selected)
+                                        .unwrap_or(false)
+                                    {
+                                        let v = &self.registry[&BlobId::Oid(*oid)];
+                                        drop = Some((v.reason.clone(), v.size, false));
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     match drop {
@@ -521,7 +554,8 @@ impl gfx_core::Transform for StripBlobs {
                                 | FileOp::Delete { path }
                                 | FileOp::Copy { to: path, .. }
                                 | FileOp::Rename { to: path, .. } => path.clone(),
-                                _ => unreachable!("DeleteAll/Note never set `drop`"),
+                                FileOp::Note { .. } => BString::from(b"<note>".to_vec()),
+                                _ => unreachable!("DeleteAll never sets `drop`"),
                             };
                             self.record(&ref_name, &path, reason, bytes, divergent);
                         }
