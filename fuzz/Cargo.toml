@@ -12,6 +12,7 @@ libfuzzer-sys = "0.4"
 gfx-strip-blobs = { path = "../crates/gfx-strip-blobs" }
 gfx-redact = { path = "../crates/gfx-redact" }
 gfx-core = { path = "../crates/gfx-core" }
+gfx-pack = { path = "../crates/gfx-pack" }
 
 [[bin]]
 name = "glob_match"
@@ -30,6 +31,13 @@ bench = false
 [[bin]]
 name = "strip_roundtrip"
 path = "fuzz_targets/strip_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "manifest_parse"
+path = "fuzz_targets/manifest_parse.rs"
 test = false
 doc = false
 bench = false

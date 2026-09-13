@@ -2,10 +2,10 @@
 
 | Field    | Value |
 |----------|-------|
-| Status   | In progress (M0–M4 implemented; M5 hardening next) |
+| Status   | Implemented (M0–M5) |
 | Scope    | New std driver crate `gfx-pack` + two `gfx` subcommands: fan-out export → passes → hash remap → zip (optionally encrypted), and the exact reverse |
 | Depends  | plan-fast-export.md §5–§7 (architecture, builtins, remap), plan-pass-driver-strip-blobs.md §4 (driver, registry), plan-redact-idents.md (redact pass), rewrite-cli.md (user-facing pass surface) |
-| Updated  | 2026-09-13 (M4 --jobs fan-out; pass-config handles Rc→Arc for Send/Sync) |
+| Updated  | 2026-09-13 (M5 hardening — see [pack-cli.md](pack-cli.md) for the user-facing surface) |
 
 ---
 

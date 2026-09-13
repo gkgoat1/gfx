@@ -48,7 +48,8 @@ fuzz_target!(|data: &[u8]| {
         }
     }
     let _ = parser.finish(&mut out);
-    for ev in out.drain(..) {
+    let drained: Vec<_> = out.drain(..).collect();
+    for ev in drained {
         if redact.apply(ev, &mut out).is_err() {
             return;
         }
