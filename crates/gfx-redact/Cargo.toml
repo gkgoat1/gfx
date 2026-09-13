@@ -1,0 +1,14 @@
+[package]
+name = "gfx-redact"
+description = "gfx builtin: redaction of commit/tag metadata (idents + timestamps) from fast-export streams"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gfx-core = { workspace = true }
+bstr = { workspace = true }
+
+[dev-dependencies]
+gfx-core = { workspace = true, features = ["test-kit"] }

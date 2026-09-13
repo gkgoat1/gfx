@@ -103,6 +103,9 @@ pub enum PassSpec {
     /// Builtin: retroactive removal of large/generated files (plan §5).
     #[cfg(feature = "strip-blobs")]
     StripBlobs(gfx_strip_blobs::StripBlobsConfig),
+    /// Builtin: commit-metadata redaction (plan-redact-idents.md §4).
+    #[cfg(feature = "redact")]
+    Redact(gfx_redact::RedactConfig),
 }
 
 impl PassSpec {
@@ -112,6 +115,8 @@ impl PassSpec {
             PassSpec::Remap(_) => "remap",
             #[cfg(feature = "strip-blobs")]
             PassSpec::StripBlobs(_) => "strip-blobs",
+            #[cfg(feature = "redact")]
+            PassSpec::Redact(_) => "redact",
         }
     }
 
@@ -292,6 +297,10 @@ impl PassDriver {
         let mut strip: Option<gfx_strip_blobs::StripBlobs> = None;
         #[cfg(feature = "strip-blobs")]
         let mut strip_report: Option<gfx_strip_blobs::StripReport> = None;
+        #[cfg(feature = "redact")]
+        let mut redact: Option<gfx_redact::Redact> = None;
+        #[cfg(feature = "redact")]
+        let mut redact_report: Option<gfx_redact::RedactReport> = None;
         for p in &self.passes {
             match p {
                 #[cfg(feature = "remap")]
@@ -300,6 +309,8 @@ impl PassDriver {
                 PassSpec::StripBlobs(cfg) => {
                     strip = Some(gfx_strip_blobs::StripBlobs::new(cfg.clone()))
                 }
+                #[cfg(feature = "redact")]
+                PassSpec::Redact(cfg) => redact = Some(gfx_redact::Redact::new(cfg.clone())),
             }
         }
         let mut content = content;
@@ -328,6 +339,20 @@ impl PassDriver {
             s.finish(&mut next)?;
             events = next;
             strip_report = Some(s.report().clone());
+        }
+
+        // Redact stage: rewrites surviving commits'/tags' metadata (plan
+        // §4.7: strip decides which ops exist, redact decides what the
+        // surviving commits' metadata says).
+        #[cfg(feature = "redact")]
+        if let Some(r) = redact.as_mut() {
+            let mut next = Vec::new();
+            for ev in events.drain(..) {
+                r.apply(ev, &mut next)?;
+            }
+            r.finish(&mut next)?;
+            events = next;
+            redact_report = Some(r.report());
         }
 
         #[cfg(feature = "remap")]
@@ -366,6 +391,13 @@ impl PassDriver {
             report.passes.push(PassSummary {
                 name: "strip-blobs",
                 detail: s.report().summary_text(),
+            });
+        }
+        #[cfg(feature = "redact")]
+        if let Some(r) = redact.as_ref() {
+            report.passes.push(PassSummary {
+                name: "redact",
+                detail: r.report().summary_text(),
             });
         }
         #[cfg(feature = "remap")]
@@ -424,6 +456,12 @@ impl PassDriver {
         #[cfg(feature = "strip-blobs")]
         if let Some(sr) = strip_report.as_ref() {
             std::fs::write(gfx_dir.join("strip-report.txt"), sr.to_text())?;
+        }
+        // The mapping artifact is SENSITIVE (plan §4.8): it re-identifies
+        // the redacted repo. Written only on real runs, never in dry-run.
+        #[cfg(feature = "redact")]
+        if let Some(rr) = redact_report.as_ref() {
+            std::fs::write(gfx_dir.join("redact-map.txt"), rr.to_text())?;
         }
         report.artifacts_dir = Some(gfx_dir);
         Ok(report)
