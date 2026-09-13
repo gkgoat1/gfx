@@ -216,6 +216,18 @@ pub enum PseudonymStyle {
     Hash,
 }
 
+/// The ordinal pseudonym for `ordinal` (1-based): `User {n}` /
+/// `user{n}@example.invalid`. Public so multistream hosts
+/// (plan-multistream-pack.md D3) can pre-assign a *shared* ordinal space
+/// across several streams and inject it as an exact [`IdentMode::Table`]
+/// without duplicating this format string.
+pub fn ordinal_pseudonym(ordinal: u64) -> (BString, BString) {
+    (
+        BString::from(alloc::format!("User {ordinal}")),
+        BString::from(alloc::format!("user{ordinal}@example.invalid")),
+    )
+}
+
 /// Pass configuration (plan §4.3–§4.4).
 #[derive(Clone, Debug)]
 pub struct RedactConfig {
@@ -507,10 +519,7 @@ impl Redact {
                         }
                     };
                     let pseud = match style {
-                        PseudonymStyle::Ordinal => (
-                            BString::from(alloc::format!("User {ordinal}")),
-                            BString::from(alloc::format!("user{ordinal}@example.invalid")),
-                        ),
+                        PseudonymStyle::Ordinal => ordinal_pseudonym(ordinal),
                         PseudonymStyle::Hash => {
                             let d = time::ident_digest(&ident.name, &ident.email);
                             (

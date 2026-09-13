@@ -186,6 +186,21 @@ pub mod process {
         run(repo, &["fsck", "--strict"]).map(|_| ())
     }
 
+    /// The repo's object format (`sha1` / `sha256`), from
+    /// `git rev-parse --object-format`. Unknown formats are an error —
+    /// remap's OID handling is format-sensitive.
+    pub fn object_format(repo: &Path) -> Result<gfx_core::ObjectFormat, GitError> {
+        match text(repo, &["rev-parse", "--object-format"])?.as_str() {
+            "sha1" => Ok(gfx_core::ObjectFormat::Sha1),
+            "sha256" => Ok(gfx_core::ObjectFormat::Sha256),
+            other => Err(GitError {
+                command: format!("-C {} rev-parse --object-format", repo.display()),
+                status: None,
+                stderr: format!("unknown object format {other:?}"),
+            }),
+        }
+    }
+
     pub fn is_bare(repo: &Path) -> Result<bool, GitError> {
         Ok(text(repo, &["rev-parse", "--is-bare-repository"])? == "true")
     }

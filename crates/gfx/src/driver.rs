@@ -286,137 +286,20 @@ impl PassDriver {
 
     fn round(&mut self, import: bool) -> Result<RunReport, DriverError> {
         let input = crate::git::process::export_stream(&self.repo, &[])?;
-        let input_len = input.len();
-
-        // Stages in validated order: content passes feed the typed remap
-        // stage, which is always last (with_passes enforces the order).
-        let content = Pipeline::builder().build();
-        #[cfg(feature = "remap")]
-        let mut remap: Option<gfx_remap::Remap> = None;
-        #[cfg(feature = "strip-blobs")]
-        let mut strip: Option<gfx_strip_blobs::StripBlobs> = None;
-        #[cfg(feature = "strip-blobs")]
-        let mut strip_report: Option<gfx_strip_blobs::StripReport> = None;
-        #[cfg(feature = "redact")]
-        let mut redact: Option<gfx_redact::Redact> = None;
-        #[cfg(feature = "redact")]
-        let mut redact_report: Option<gfx_redact::RedactReport> = None;
-        for p in &self.passes {
-            match p {
-                #[cfg(feature = "remap")]
-                PassSpec::Remap(cfg) => remap = Some(gfx_remap::Remap::new(cfg.clone())),
-                #[cfg(feature = "strip-blobs")]
-                PassSpec::StripBlobs(cfg) => {
-                    strip = Some(gfx_strip_blobs::StripBlobs::new(cfg.clone()))
-                }
-                #[cfg(feature = "redact")]
-                PassSpec::Redact(cfg) => redact = Some(gfx_redact::Redact::new(cfg.clone())),
-            }
-        }
-        let mut content = content;
-
-        // Parse → content stages (strip first, then the custom pipeline) →
-        // remap stage → canonical bytes.
-        let mut parser = Parser::new(ParseOptions::default());
-        parser.feed(&input);
-        let mut events = Vec::new();
-        while let Some(ev) = parser.next_event()? {
-            content.apply(ev, &mut events)?;
-        }
-        let mut tail = Vec::new();
-        parser.finish(&mut tail)?;
-        for ev in tail {
-            content.apply(ev, &mut events)?;
-        }
-        content.finish(&mut events)?;
-
-        #[cfg(feature = "strip-blobs")]
-        if let Some(s) = strip.as_mut() {
-            let mut next = Vec::new();
-            for ev in events.drain(..) {
-                s.apply(ev, &mut next)?;
-            }
-            s.finish(&mut next)?;
-            events = next;
-            strip_report = Some(s.report().clone());
-        }
-
-        // Redact stage: rewrites surviving commits'/tags' metadata (plan
-        // §4.7: strip decides which ops exist, redact decides what the
-        // surviving commits' metadata says).
-        #[cfg(feature = "redact")]
-        if let Some(r) = redact.as_mut() {
-            let mut next = Vec::new();
-            for ev in events.drain(..) {
-                r.apply(ev, &mut next)?;
-            }
-            r.finish(&mut next)?;
-            events = next;
-            redact_report = Some(r.report());
-        }
-
-        #[cfg(feature = "remap")]
-        if let Some(r) = remap.as_mut() {
-            let mut next = Vec::new();
-            for ev in events.drain(..) {
-                r.apply(ev, &mut next)?;
-            }
-            r.finish(&mut next)?;
-            events = next;
-        }
-
-        let mut writer = Writer::new();
-        for ev in &events {
-            writer.write(ev)?;
-        }
-        let output = writer.take();
-        let identity = output == input;
+        let mut out = transform_stream(&input, &self.passes)?;
 
         let mut report = RunReport {
             dry_run: !import,
-            passes: Vec::new(),
-            input_bytes: input_len,
-            output_bytes: output.len(),
-            identity,
-            commits_observed: 0,
-            commits_rewritten: 0,
-            commit_map: None,
+            passes: out.passes.clone(),
+            input_bytes: out.input_bytes,
+            output_bytes: out.output.len(),
+            identity: out.identity,
+            commits_observed: out.commits_observed,
+            commits_rewritten: out.commits_rewritten,
+            commit_map: out.commit_map.clone(),
             ref_map: Vec::new(),
             artifacts_dir: None,
         };
-
-        // Per-pass summaries + pre-finalization map.
-        #[cfg(feature = "strip-blobs")]
-        if let Some(s) = strip.as_ref() {
-            report.passes.push(PassSummary {
-                name: "strip-blobs",
-                detail: s.report().summary_text(),
-            });
-        }
-        #[cfg(feature = "redact")]
-        if let Some(r) = redact.as_ref() {
-            report.passes.push(PassSummary {
-                name: "redact",
-                detail: r.report().summary_text(),
-            });
-        }
-        #[cfg(feature = "remap")]
-        if let Some(r) = remap.as_ref() {
-            let st = r.stats();
-            report.commits_observed = st.commits_observed;
-            report.commits_rewritten = st.commits_rewritten;
-            report.passes.push(PassSummary {
-                name: "remap",
-                detail: format!(
-                    "commits_observed={} commits_rewritten={} refs_rewritten={} message_oids_tracked={}",
-                    st.commits_observed,
-                    st.commits_rewritten,
-                    st.refs_rewritten,
-                    st.message_oids_tracked
-                ),
-            });
-            report.commit_map = Some(r.commit_map());
-        }
 
         if !import {
             return Ok(report);
@@ -427,10 +310,10 @@ impl PassDriver {
         let gfx_dir = gitdir.join("gfx");
         std::fs::create_dir_all(&gfx_dir)?;
         let marks_path = gfx_dir.join("marks.out");
-        crate::git::process::import_stream(&self.repo, &output, &marks_path)?;
+        crate::git::process::import_stream(&self.repo, &out.output, &marks_path)?;
 
         #[cfg(feature = "remap")]
-        if let Some(r) = remap.as_mut() {
+        if let Some(r) = out.remap.as_mut() {
             let marks_bytes = std::fs::read(&marks_path)?;
             let marks = MarkFile::parse(&marks_bytes)?;
             r.finalize_from_marks(&marks);
@@ -454,18 +337,193 @@ impl PassDriver {
         // Artifacts (plan §4.3). Deterministic contents (A6).
         write_artifacts(&gfx_dir, &report)?;
         #[cfg(feature = "strip-blobs")]
-        if let Some(sr) = strip_report.as_ref() {
+        if let Some(sr) = out.strip_report.as_ref() {
             std::fs::write(gfx_dir.join("strip-report.txt"), sr.to_text())?;
         }
         // The mapping artifact is SENSITIVE (plan §4.8): it re-identifies
         // the redacted repo. Written only on real runs, never in dry-run.
         #[cfg(feature = "redact")]
-        if let Some(rr) = redact_report.as_ref() {
+        if let Some(rr) = out.redact_report.as_ref() {
             std::fs::write(gfx_dir.join("redact-map.txt"), rr.to_text())?;
         }
         report.artifacts_dir = Some(gfx_dir);
         Ok(report)
     }
+}
+
+/// The transform half of a round: parse an export stream and push it
+/// through a validated pass sequence, with no host side effects (no import,
+/// no refs, no artifacts). Shared with the multistream pack driver
+/// (plan-multistream-pack.md D2), which owns its own fan-out plumbing.
+#[derive(Debug)]
+pub struct TransformOutcome {
+    /// Canonical output stream bytes.
+    pub output: Vec<u8>,
+    pub input_bytes: usize,
+    /// Output stream is byte-identical to the export input.
+    pub identity: bool,
+    /// Per-pass summaries, in pipeline order.
+    pub passes: Vec<PassSummary>,
+    pub commits_observed: usize,
+    pub commits_rewritten: usize,
+    /// Pre-finalization `old → new` view (unchanged commits map to
+    /// themselves; rewritten ones to `None` until the caller finalizes).
+    #[cfg(feature = "remap")]
+    pub commit_map: Option<gfx_remap::CommitMap>,
+    /// The remap stage itself, so the caller can fold in a downstream
+    /// import's marks (`Remap::finalize_from_marks`).
+    #[cfg(feature = "remap")]
+    pub remap: Option<gfx_remap::Remap>,
+    #[cfg(feature = "strip-blobs")]
+    pub strip_report: Option<gfx_strip_blobs::StripReport>,
+    #[cfg(feature = "redact")]
+    pub redact_report: Option<gfx_redact::RedactReport>,
+}
+
+/// Parse `input` and run `passes` over it in pipeline order. Assumes the
+/// sequence already satisfies the ordering contract (content passes first,
+/// at most one remap, last) — `PassDriver::with_passes` is the validator.
+pub fn transform_stream(
+    input: &[u8],
+    passes: &[PassSpec],
+) -> Result<TransformOutcome, DriverError> {
+    // Stages in validated order: content passes feed the typed remap
+    // stage, which is always last.
+    let content = Pipeline::builder().build();
+    #[cfg(feature = "remap")]
+    let mut remap: Option<gfx_remap::Remap> = None;
+    #[cfg(feature = "strip-blobs")]
+    let mut strip: Option<gfx_strip_blobs::StripBlobs> = None;
+    #[cfg(feature = "redact")]
+    let mut redact: Option<gfx_redact::Redact> = None;
+    for p in passes {
+        match p {
+            #[cfg(feature = "remap")]
+            PassSpec::Remap(cfg) => remap = Some(gfx_remap::Remap::new(cfg.clone())),
+            #[cfg(feature = "strip-blobs")]
+            PassSpec::StripBlobs(cfg) => {
+                strip = Some(gfx_strip_blobs::StripBlobs::new(cfg.clone()))
+            }
+            #[cfg(feature = "redact")]
+            PassSpec::Redact(cfg) => redact = Some(gfx_redact::Redact::new(cfg.clone())),
+        }
+    }
+    let mut content = content;
+
+    // Parse → content stages (strip first, then the custom pipeline) →
+    // remap stage → canonical bytes.
+    let mut parser = Parser::new(ParseOptions::default());
+    parser.feed(input);
+    let mut events = Vec::new();
+    while let Some(ev) = parser.next_event()? {
+        content.apply(ev, &mut events)?;
+    }
+    let mut tail = Vec::new();
+    parser.finish(&mut tail)?;
+    for ev in tail {
+        content.apply(ev, &mut events)?;
+    }
+    content.finish(&mut events)?;
+
+    #[cfg(feature = "strip-blobs")]
+    let mut strip_report = None;
+    #[cfg(feature = "strip-blobs")]
+    if let Some(s) = strip.as_mut() {
+        let mut next = Vec::new();
+        for ev in events.drain(..) {
+            s.apply(ev, &mut next)?;
+        }
+        s.finish(&mut next)?;
+        events = next;
+        strip_report = Some(s.report().clone());
+    }
+
+    // Redact stage: rewrites surviving commits'/tags' metadata (plan
+    // §4.7: strip decides which ops exist, redact decides what the
+    // surviving commits' metadata says).
+    #[cfg(feature = "redact")]
+    let mut redact_report = None;
+    #[cfg(feature = "redact")]
+    if let Some(r) = redact.as_mut() {
+        let mut next = Vec::new();
+        for ev in events.drain(..) {
+            r.apply(ev, &mut next)?;
+        }
+        r.finish(&mut next)?;
+        events = next;
+        redact_report = Some(r.report());
+    }
+
+    #[cfg(feature = "remap")]
+    if let Some(r) = remap.as_mut() {
+        let mut next = Vec::new();
+        for ev in events.drain(..) {
+            r.apply(ev, &mut next)?;
+        }
+        r.finish(&mut next)?;
+        events = next;
+    }
+
+    let mut writer = Writer::new();
+    for ev in &events {
+        writer.write(ev)?;
+    }
+    let output = writer.take();
+
+    let mut out = TransformOutcome {
+        identity: output == input,
+        output,
+        input_bytes: input.len(),
+        passes: Vec::new(),
+        commits_observed: 0,
+        commits_rewritten: 0,
+        #[cfg(feature = "remap")]
+        commit_map: None,
+        #[cfg(feature = "remap")]
+        remap: None,
+        #[cfg(feature = "strip-blobs")]
+        strip_report,
+        #[cfg(feature = "redact")]
+        redact_report,
+    };
+
+    // Per-pass summaries + pre-finalization map.
+    #[cfg(feature = "strip-blobs")]
+    if let Some(s) = strip.as_ref() {
+        out.passes.push(PassSummary {
+            name: "strip-blobs",
+            detail: s.report().summary_text(),
+        });
+    }
+    #[cfg(feature = "redact")]
+    if let Some(r) = redact.as_ref() {
+        out.passes.push(PassSummary {
+            name: "redact",
+            detail: r.report().summary_text(),
+        });
+    }
+    #[cfg(feature = "remap")]
+    if let Some(r) = remap.as_ref() {
+        let st = r.stats();
+        out.commits_observed = st.commits_observed;
+        out.commits_rewritten = st.commits_rewritten;
+        out.passes.push(PassSummary {
+            name: "remap",
+            detail: format!(
+                "commits_observed={} commits_rewritten={} refs_rewritten={} message_oids_tracked={}",
+                st.commits_observed,
+                st.commits_rewritten,
+                st.refs_rewritten,
+                st.message_oids_tracked
+            ),
+        });
+        out.commit_map = Some(r.commit_map());
+    }
+    #[cfg(feature = "remap")]
+    {
+        out.remap = remap;
+    }
+    Ok(out)
 }
 
 /// Serialize the run artifacts: `commit-map`, `ref-map`, `run-report.txt`.
