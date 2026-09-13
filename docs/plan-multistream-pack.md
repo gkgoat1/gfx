@@ -2,10 +2,10 @@
 
 | Field    | Value |
 |----------|-------|
-| Status   | Draft — pre-implementation |
+| Status   | In progress (M0–M1 implemented; M2 next) |
 | Scope    | New std driver crate `gfx-pack` + two `gfx` subcommands: fan-out export → passes → hash remap → zip (optionally encrypted), and the exact reverse |
 | Depends  | plan-fast-export.md §5–§7 (architecture, builtins, remap), plan-pass-driver-strip-blobs.md §4 (driver, registry), plan-redact-idents.md (redact pass), rewrite-cli.md (user-facing pass surface) |
-| Updated  | — |
+| Updated  | 2026-09-13 (M0 format core, M1 pack driver + CLI; driver fix: host-side canonical-digest detection in transform_stream) |
 
 ---
 
