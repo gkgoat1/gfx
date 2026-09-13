@@ -261,3 +261,23 @@ fn chunked_feed_is_invariant() {
     p.finish(&mut out).expect("finish");
     assert_eq!(out, events);
 }
+
+/// Canonical tag serialization follows git: `original-oid` comes AFTER
+/// `from` in a tag block (fast-import rejects it before `from`; verified
+/// against git 2.50 via the r8 driver test). Pinned here at the byte level.
+#[test]
+fn tag_original_oid_comes_after_from() {
+    let ev = Event::Tag(Tag {
+        name: bstr::BString::from("v1".as_bytes()),
+        mark: Some(7),
+        original_oid: Some(Oid::from_hex(b"1234567890123456789012345678901234567890", ObjectFormat::Sha1).unwrap()),
+        from: Some(Committish::Mark(2)),
+        tagger: None,
+        message: Data(b"m\n".to_vec()),
+    });
+    let bytes = encode(&[ev]).unwrap();
+    let text = String::from_utf8(bytes).unwrap();
+    let from = text.find("from :2").expect("from line");
+    let oid = text.find("original-oid ").expect("original-oid line");
+    assert!(from < oid, "original-oid must follow from, got:\n{text}");
+}

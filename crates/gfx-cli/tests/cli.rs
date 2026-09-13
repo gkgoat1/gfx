@@ -274,3 +274,224 @@ fn arg_kinds_are_distinct() {
     assert_ne!(ArgKind::Flag, ArgKind::Value);
     assert_ne!(ArgKind::Value, ArgKind::Size);
 }
+
+// ------------------------------------------------------- redact (M2)
+
+fn redact_registry() -> PassRegistry {
+    PassRegistry::new(vec![
+        gfx_cli::passes::strip_blobs_factory(),
+        gfx_cli::passes::redact_factory(),
+        gfx_cli::passes::remap_factory(),
+    ])
+    .unwrap()
+}
+
+/// Decision D2: redact is registered but NOT in the default --passes.
+#[test]
+fn redact_registered_but_not_in_default_passes() {
+    let reg = redact_registry();
+    assert_eq!(reg.default_spec(), "strip-blobs,remap");
+    // ...and still discoverable/resolvable when named explicitly.
+    let specs = reg.all_args(&gfx_cli::cli::global_args());
+    let map = parse_argv(&specs, &os(&[])).unwrap();
+    let passes = reg.resolve("strip-blobs,redact,remap", &map).unwrap();
+    assert_eq!(
+        passes.iter().map(|p| p.name()).collect::<Vec<_>>(),
+        vec!["strip-blobs", "redact", "remap"]
+    );
+}
+
+/// §5.1 rules: mutual exclusions, context-invalid flags, fuzz seed policy.
+#[test]
+fn redact_flag_rules_are_enforced() {
+    let reg = redact_registry();
+    let specs = reg.all_args(&gfx_cli::cli::global_args());
+    let cases: &[(&[&str], bool)] = &[
+        // valid: pseudonymize + zero
+        (&["--redact.pseudonymize", "--redact.time-mode", "zero"], true),
+        // valid: time-only redaction (independent axes, §4.4)
+        (&["--redact.time-mode", "shift", "--redact.time-shift", "365d"], true),
+        // map + pseudonymize conflict
+        (
+            &["--redact.map", "m.toml", "--redact.pseudonymize"],
+            false,
+        ),
+        // style without pseudonymize
+        (&["--redact.pseudonym-style", "hash"], false),
+        // shift without amount
+        (&["--redact.time-mode", "shift"], false),
+        // bucket without unit
+        (&["--redact.time-mode", "bucket"], false),
+        // fuzz without seed
+        (&["--redact.time-mode", "fuzz", "--redact.time-jitter", "2d"], false),
+        // seed without fuzz
+        (&["--redact.seed", "7"], false),
+        // fuzz with seed → ok
+        (
+            &[
+                "--redact.time-mode",
+                "fuzz",
+                "--redact.time-jitter",
+                "3600",
+                "--redact.seed",
+                "0x9E3779B97F4A7C15",
+            ],
+            true,
+        ),
+        // unknown enum values
+        (&["--redact.time-mode", "yesterday"], false),
+        (&["--redact.pseudonym-style", "rot13", "--redact.pseudonymize"], false),
+    ];
+    for (argv, ok) in cases {
+        let map = parse_argv(&specs, &os(argv)).unwrap();
+        let passes = reg.resolve("redact,remap", &map);
+        assert_eq!(passes.is_ok(), *ok, "argv {argv:?} -> {passes:?}");
+    }
+}
+
+/// The unused-flag guard (§5.1, mandatory for redact): --redact.* flags
+/// without `redact` in --passes are a usage error — never silently skipped.
+#[test]
+fn redact_flags_without_redact_pass_are_usage_errors() {
+    let mut out = Vec::new();
+    let code = gfx_cli::run_rewrite_cli_to(
+        &mut out,
+        "test-gfx",
+        "about",
+        redact_registry_factories(),
+        os(&["--repo", "/definitely/not/a/repo", "--dry-run", "--redact.pseudonymize"]),
+    );
+    assert_eq!(code, gfx_cli::EXIT_USAGE);
+    // The explanation goes to stderr (eprintln!), so stdout stays empty.
+    assert!(out.is_empty());
+}
+
+/// Redact flags ride through the CLI to the pass config (fails only at the
+/// repo check, proving parsing/validation accepted the flags).
+#[test]
+fn redact_flags_reach_the_pass_through_the_cli() {
+    let mut out = Vec::new();
+    let code = gfx_cli::run_rewrite_cli_to(
+        &mut out,
+        "test-gfx",
+        "about",
+        redact_registry_factories(),
+        os(&[
+            "--repo",
+            "/definitely/not/a/repo",
+            "--dry-run",
+            "--passes",
+            "redact,remap",
+            "--redact.pseudonymize",
+            "--redact.time-mode",
+            "bucket",
+            "--redact.time-bucket",
+            "month",
+        ]),
+    );
+    assert_eq!(code, gfx_cli::EXIT_FAILURE, "{}", String::from_utf8_lossy(&out));
+}
+
+fn redact_registry_factories() -> Vec<Box<dyn gfx_cli::PassFactory>> {
+    vec![
+        gfx_cli::passes::strip_blobs_factory(),
+        gfx_cli::passes::redact_factory(),
+        gfx_cli::passes::remap_factory(),
+    ]
+}
+
+/// The `--redact.map` TOML file parses into exact rows, with wildcards.
+#[test]
+fn redact_map_file_parses_with_wildcards() {
+    let dir = std::env::temp_dir().join(format!("gfx-redact-map-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let map_path = dir.join("idents.toml");
+    std::fs::write(
+        &map_path,
+        "[[row]]\nname = \"Alice\"\nemail = \"alice@example.com\"\nnew_name = \"Bot 1\"\nnew_email = \"bot1@ci\"\n\n[[row]]\nemail = \"@contractors\"\nnew_name = \"Ext\"\nnew_email = \"ext@example.invalid\"\n",
+    )
+    .unwrap();
+
+    let reg = redact_registry();
+    let specs = reg.all_args(&gfx_cli::cli::global_args());
+    let map = parse_argv(
+        &specs,
+        &os(&["--passes", "redact,remap", "--redact.map", map_path.to_str().unwrap()]),
+    )
+    .unwrap();
+    let passes = reg.resolve("redact,remap", &map).unwrap();
+    match &passes[0] {
+        PassSpec::Redact(cfg) => match &cfg.ident_mode {
+            gfx::gfx_redact::IdentMode::Table(rows) => {
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0].name.as_deref().map(|v| v.as_slice()), Some(&b"Alice"[..]));
+                assert_eq!(rows[1].name, None, "omitted name is a wildcard");
+                assert_eq!(rows[1].new_name.as_slice(), b"Ext");
+            }
+            other => panic!("want table mode, got {other:?}"),
+        },
+        other => panic!("want redact spec, got {other:?}"),
+    }
+
+    // Missing required fields are hard errors.
+    std::fs::write(&map_path, "[[row]]\nname = \"X\"\n").unwrap();
+    let map = parse_argv(
+        &specs,
+        &os(&["--passes", "redact,remap", "--redact.map", map_path.to_str().unwrap()]),
+    )
+    .unwrap();
+    let err = reg.resolve("redact,remap", &map).unwrap_err();
+    assert!(matches!(err, gfx_cli::CliError::BadConfig { .. }), "{err}");
+}
+
+/// The `[redact]` table in the `--config` TOML file supplies flags, CLI
+/// wins, and unknown keys are rejected.
+#[test]
+fn config_file_redact_table() {
+    let dir = std::env::temp_dir().join(format!("gfx-cli-redact-cfg-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg_path = dir.join("gfx.toml");
+    std::fs::write(
+        &cfg_path,
+        "[redact]\npseudonymize = true\ntime-mode = \"zero\"\n",
+    )
+    .unwrap();
+
+    let mut out = Vec::new();
+    let code = gfx_cli::run_rewrite_cli_to(
+        &mut out,
+        "test-gfx",
+        "about",
+        redact_registry_factories(),
+        os(&[
+            "--repo",
+            "/definitely/not/a/repo",
+            "--dry-run",
+            "--config",
+            cfg_path.to_str().unwrap(),
+            "--passes",
+            "redact,remap",
+        ]),
+    );
+    // Config accepted; run fails only at the repo check.
+    assert_eq!(code, gfx_cli::EXIT_FAILURE, "{}", String::from_utf8_lossy(&out));
+
+    // Unknown key in [redact] is a usage error.
+    std::fs::write(&cfg_path, "[redact]\nnope = true\n").unwrap();
+    let mut out = Vec::new();
+    let code = gfx_cli::run_rewrite_cli_to(
+        &mut out,
+        "test-gfx",
+        "about",
+        redact_registry_factories(),
+        os(&[
+            "--config",
+            cfg_path.to_str().unwrap(),
+            "--passes",
+            "redact,remap",
+        ]),
+    );
+    assert_eq!(code, gfx_cli::EXIT_USAGE);
+}

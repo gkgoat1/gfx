@@ -12,3 +12,4 @@ bstr = { workspace = true }
 
 [dev-dependencies]
 gfx-core = { workspace = true, features = ["test-kit"] }
+gfx-cli = { workspace = true }

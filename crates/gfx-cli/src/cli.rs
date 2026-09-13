@@ -63,7 +63,8 @@ pub fn run_rewrite_cli_to(
                 | CliError::UnexpectedPositional(_)
                 | CliError::UnknownPass { .. }
                 | CliError::PassOrder(_)
-                | CliError::BadConfig { .. } => EXIT_USAGE,
+                | CliError::BadConfig { .. }
+                | CliError::FlagConflict(_) => EXIT_USAGE,
                 _ => EXIT_FAILURE,
             }
         }
@@ -102,6 +103,20 @@ fn try_run(
 
     // Validate ordering *before* touching the repository (A4: bad pass
     // configuration is a usage error with no side effects).
+    // Unused-flag guard (plan-redact-idents.md §5.1, mandatory for
+    // redact): pass flags given for a pass not named in --passes are a
+    // usage error — silently ignoring them would leave the operator
+    // believing history was redacted.
+    for key in map.keys().map(|k| k.to_string()).collect::<Vec<_>>() {
+        if key.starts_with("redact.")
+            && !passes.iter().any(|p| p.name() == "redact")
+        {
+            return Err(CliError::FlagConflict(format!(
+                "--{key} given but the redact pass is not in --passes; redaction must never be silently skipped"
+            )));
+        }
+    }
+
     let mut remap_seen = false;
     for (i, p) in passes.iter().enumerate() {
         if p.is_remap() {

@@ -266,14 +266,17 @@ fn write_tag(out: &mut Vec<u8>, t: &Tag) -> Result<(), Error> {
         push_mark(out, m);
         out.push(b'\n');
     }
-    if let Some(oid) = &t.original_oid {
-        out.extend_from_slice(b"original-oid ");
-        out.extend_from_slice(&oid.to_hex());
-        out.push(b'\n');
-    }
     if let Some(f) = &t.from {
         out.extend_from_slice(b"from ");
         write_committish(out, f)?;
+        out.push(b'\n');
+    }
+    // Canonical order follows git fast-export/fast-import: `original-oid`
+    // comes AFTER `from` in a tag block (fast-import rejects it before
+    // `from`; blobs/commits take it first). Verified against git 2.50.
+    if let Some(oid) = &t.original_oid {
+        out.extend_from_slice(b"original-oid ");
+        out.extend_from_slice(&oid.to_hex());
         out.push(b'\n');
     }
     if let Some(g) = &t.tagger {

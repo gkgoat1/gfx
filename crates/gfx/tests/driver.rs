@@ -34,6 +34,22 @@ fn git(repo: &Path, args: &[&str]) -> Vec<u8> {
     out.stdout
 }
 
+fn git_env(repo: &Path, args: &[&str], envs: &[(&str, &str)]) -> Vec<u8> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .envs(envs.iter().copied())
+        .output()
+        .expect("spawn git");
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out.stdout
+}
+
 fn git_ok(repo: &Path, args: &[&str]) -> bool {
     Command::new("git")
         .arg("-C")
@@ -293,4 +309,160 @@ fn empty_branch_is_dropped_like_filter_repo() {
     let report = d.run().unwrap();
     assert!(report.identity);
     assert!(gfx::git::process::fsck(&bare).is_ok());
+}
+
+// ------------------------------------------------------- redact (M2)
+
+/// R8: redact+remap end-to-end on a real repo — import succeeds, fsck is
+/// clean, no original identity/date survives in `git log`, and the
+/// sensitive mapping artifact is written (real run only).
+#[cfg(feature = "redact")]
+#[test]
+fn r8_redact_and_remap_end_to_end() {
+    use gfx::gfx_redact::{IdentMode, RedactConfig, TimeMode};
+
+    let base = tmpdir("r8");
+    let work = base.join("work");
+    let bare = base.join("bare.git");
+    std::fs::create_dir_all(&work).unwrap();
+    git(&base, &["init", "-q", "work"]);
+    std::fs::write(work.join("a.txt"), b"one\n").unwrap();
+    git(&work, &["add", "."]);
+    git_env(
+        &work,
+        &["-c", "user.name=Alice", "-c", "user.email=alice@example.com", "commit", "-qm", "one"],
+        &[
+            ("GIT_AUTHOR_DATE", "2023-11-14T22:13:40+02:00"),
+            ("GIT_COMMITTER_DATE", "2023-11-14T22:13:40+02:00"),
+        ],
+    );
+    std::fs::write(work.join("b.txt"), b"two\n").unwrap();
+    git(&work, &["add", "."]);
+    git_env(
+        &work,
+        &["-c", "user.name=Bob", "-c", "user.email=bob@example.org", "commit", "-qm", "two"],
+        &[
+            ("GIT_AUTHOR_DATE", "2023-11-15T09:30:00+02:00"),
+            ("GIT_COMMITTER_DATE", "2023-11-15T09:30:00+02:00"),
+        ],
+    );
+    git_env(
+        &work,
+        &["-c", "user.name=Tagr", "-c", "user.email=tagr@example.net", "tag", "-a", "v1", "-m", "tag one"],
+        &[],
+    );
+    git(&base, &["clone", "-q", "--bare", "work", "bare.git"]);
+    let _ = std::fs::remove_dir_all(&work);
+
+    let head_before = String::from_utf8(git(&bare, &["rev-parse", "HEAD"])).unwrap();
+    let mut d = PassDriver::new(&bare)
+        .unwrap()
+        .with_passes(vec![PassSpec::Redact(RedactConfig {
+            ident_mode: IdentMode::Pseudonymize(gfx::gfx_redact::PseudonymStyle::Ordinal),
+            time_mode: TimeMode::Zero,
+            ..RedactConfig::default()
+        })])
+        .unwrap();
+    let report = d.run().unwrap();
+
+    // Hashes moved (idents + times changed), topology preserved.
+    let head_after = String::from_utf8(git(&bare, &["rev-parse", "HEAD"])).unwrap();
+    assert_ne!(head_after, head_before, "redacted commits must get new hashes");
+    assert_eq!(report.commits_observed, 2);
+    gfx::git::process::fsck(&bare).expect("fsck --strict");
+
+    // The leak scan, against the imported repo itself: no original ident
+    // bytes and no nonzero original times anywhere in history.
+    let log = String::from_utf8(
+        git(&bare, &["log", "--format=%an|%ae|%at|%cn|%ce|%ct"]),
+    )
+    .unwrap();
+    for leaked in ["Alice", "alice@example.com", "Bob", "bob@example.org", "Tagr", "tagr@example.net"] {
+        assert!(!log.contains(leaked), "original ident {leaked} leaked into history");
+    }
+    assert_eq!(
+        log.lines().map(|l| l.split('|').nth(2).unwrap()).collect::<Vec<_>>(),
+        vec!["0", "0"],
+        "zero mode collapses the time axis: {log}"
+    );
+    // Pseudonyms are the ordinal ones, and structure is preserved.
+    let names = log.lines().map(|l| l.split('|').next().unwrap()).collect::<Vec<_>>();
+    assert!(names.iter().all(|n| n.starts_with("User ")), "{log}");
+    // Tag is still there, redacted too.
+    let tag = String::from_utf8(git(&bare, &["for-each-ref", "refs/tags/v1", "--format=%(taggeremail)"])).unwrap();
+    assert!(!tag.contains("example.net"), "tagger leaked: {tag}");
+
+    // The sensitive artifact exists and names the originals (that is its
+    // job) — written only on real runs.
+    let map = std::fs::read_to_string(bare.join("gfx/redact-map.txt")).unwrap();
+    assert!(map.contains("SENSITIVE"));
+    assert!(map.contains("alice@example.com"), "artifact records the original");
+
+    // Dry-run writes no artifact.
+    let bare2 = base.join("bare2.git");
+    git(&base, &["clone", "-q", "--bare", &bare.to_string_lossy(), &bare2.to_string_lossy()]);
+    let mut d2 = PassDriver::new(&bare2)
+        .unwrap()
+        .with_passes(vec![PassSpec::Redact(RedactConfig::default())])
+        .unwrap();
+    let _ = d2.dry_run().unwrap();
+    assert!(
+        !bare2.join("gfx/redact-map.txt").exists(),
+        "dry-run must not write the mapping artifact"
+    );
+}
+
+/// SHA-256 mirror: a pinning table + keep_tz leaves a sha256 repo
+/// byte-identical (hashes preserved), and a redacting round still imports
+/// cleanly.
+#[cfg(feature = "redact")]
+#[test]
+fn r8_sha256_redact_identity_and_redaction() {
+    use gfx::gfx_redact::{IdentMode, RedactConfig, RedactRow, TimeMode};
+
+    let base = tmpdir("r8s");
+    let work = base.join("work");
+    let bare = base.join("bare.git");
+    std::fs::create_dir_all(&work).unwrap();
+    git(&base, &["init", "-q", "--object-format=sha256", "work"]);
+    std::fs::write(work.join("a.txt"), b"hello sha256\n").unwrap();
+    git(&work, &["add", "."]);
+    git(&work, &["-c", "user.name=Alice", "-c", "user.email=a@x", "commit", "-qm", "one"]);
+    git(&base, &["clone", "-q", "--bare", "work", "bare.git"]);
+    let _ = std::fs::remove_dir_all(&work);
+
+    let head_before = String::from_utf8(git(&bare, &["rev-parse", "HEAD"])).unwrap();
+
+    // Identity: pin the ident to itself and keep tz.
+    let mut d = PassDriver::new(&bare)
+        .unwrap()
+        .with_passes(vec![PassSpec::Redact(RedactConfig {
+            ident_mode: IdentMode::Table(vec![RedactRow {
+                name: Some(gfx::core::BString::from("Alice".as_bytes())),
+                email: Some(gfx::core::BString::from("a@x".as_bytes())),
+                new_name: gfx::core::BString::from("Alice".as_bytes()),
+                new_email: gfx::core::BString::from("a@x".as_bytes()),
+            }]),
+            keep_tz: true,
+            ..RedactConfig::default()
+        })])
+        .unwrap();
+    let report = d.run().unwrap();
+    assert!(report.identity, "pinned table + keep_tz must be a byte-identity round");
+    assert_eq!(String::from_utf8(git(&bare, &["rev-parse", "HEAD"])).unwrap(), head_before);
+    gfx::git::process::fsck(&bare).expect("fsck --strict");
+
+    // Redaction: pseudonymize + bucket, still clean.
+    let mut d = PassDriver::new(&bare)
+        .unwrap()
+        .with_passes(vec![PassSpec::Redact(RedactConfig {
+            ident_mode: IdentMode::Pseudonymize(gfx::gfx_redact::PseudonymStyle::Hash),
+            time_mode: TimeMode::Bucket(gfx::gfx_redact::TimeBucketUnit::Day),
+            ..RedactConfig::default()
+        })])
+        .unwrap();
+    d.run().unwrap();
+    let log = String::from_utf8(git(&bare, &["log", "--format=%ae"])).unwrap();
+    assert!(!log.contains("a@x"), "sha256 mirror leaked the original email");
+    gfx::git::process::fsck(&bare).expect("fsck --strict");
 }

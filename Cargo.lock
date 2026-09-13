@@ -112,6 +112,7 @@ name = "gfx-redact"
 version = "0.1.0"
 dependencies = [
  "bstr",
+ "gfx-cli",
  "gfx-core",
 ]
 

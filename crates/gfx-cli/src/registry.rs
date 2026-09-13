@@ -28,6 +28,14 @@ pub trait PassFactory: Send + Sync {
     /// unambiguous (see [`crate::args`]).
     fn arg_spec(&self) -> Vec<ArgSpec>;
 
+    /// Whether this pass belongs in the composed binary's implicit default
+    /// `--passes`. Redaction must always be opt-in (plan-redact-idents.md
+    /// decision D2), so `redact` overrides this to `false` while staying
+    /// registered (discoverable via `--passes redact`).
+    fn in_default(&self) -> bool {
+        true
+    }
+
     /// Build the pass configuration from the parsed args. Implementations
     /// read only their own (namespaced) keys.
     fn build(&self, args: &ArgMap) -> Result<PassSpec, CliError>;
@@ -38,6 +46,10 @@ pub trait PassFactory: Send + Sync {
 impl PassFactory for Box<dyn PassFactory> {
     fn name(&self) -> &'static str {
         (**self).name()
+    }
+
+    fn in_default(&self) -> bool {
+        (**self).in_default()
     }
 
     fn arg_spec(&self) -> Vec<ArgSpec> {
@@ -88,6 +100,7 @@ impl PassRegistry {
     pub fn default_spec(&self) -> String {
         self.factories
             .iter()
+            .filter(|f| f.in_default())
             .map(|f| f.name())
             .collect::<Vec<_>>()
             .join(",")

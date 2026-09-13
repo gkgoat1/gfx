@@ -39,11 +39,16 @@ pub enum CliError {
     Io(std::io::Error),
     /// The `--config` file is malformed or references unknown passes/flags.
     BadConfig { file: String, msg: String },
+    /// Mutually exclusive or context-invalid flags (e.g. `--redact.map`
+    /// with `--redact.pseudonymize`), or pass flags given for a pass that
+    /// is not in `--passes` (redact's unused-flag guard, plan §5.1).
+    FlagConflict(String),
 }
 
 impl fmt::Display for CliError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            CliError::FlagConflict(msg) => write!(f, "{msg}"),
             CliError::UnknownFlag { flag, available } => {
                 write!(f, "unknown flag --{flag}; available: {}", available.join(", "))
             }

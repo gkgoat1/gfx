@@ -103,6 +103,15 @@ pub struct ArgMap {
 }
 
 impl ArgMap {
+    /// All keys that carry a value or were marked present (for the
+    /// unused-flag guard, plan-redact-idents.md §5.1).
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.values
+            .keys()
+            .chain(self.present.iter())
+            .map(|s| s.as_str())
+    }
+
     /// Whether a `Flag` was given.
     pub fn flag(&self, key: &str) -> bool {
         self.present.contains(key)
@@ -141,6 +150,34 @@ impl ArgMap {
 
 /// Parse `1024`, `512K`, `1M`, `2G` (case-insensitive, `B` suffix allowed)
 /// into bytes. Overflow-safe.
+/// Parse a duration in seconds: decimal, or with `d`/`w` suffix
+/// (d=86400, w=604800). Optional leading `+`/`-`. Used by redact's
+/// `--redact.time-shift` / `--redact.time-jitter` (same parser family as
+/// [`parse_size`]).
+pub fn parse_duration_secs(s: &str) -> Option<i64> {
+    let (neg, rest) = match s.strip_prefix('-') {
+        Some(r) => (true, r),
+        None => (false, s.strip_prefix('+').unwrap_or(s)),
+    };
+    let (num, mult): (&str, i64) = if let Some(n) = rest.strip_suffix('d').or_else(|| rest.strip_suffix('D')) {
+        (n, 86_400)
+    } else if let Some(n) = rest.strip_suffix('w').or_else(|| rest.strip_suffix('W')) {
+        (n, 604_800)
+    } else {
+        (rest, 1)
+    };
+    let secs: i64 = num.parse::<i64>().ok()?.checked_mul(mult)?;
+    Some(if neg { -secs } else { secs })
+}
+
+/// Parse a seed: decimal or `0x`-prefixed hex, `u64`.
+pub fn parse_seed(s: &str) -> Option<u64> {
+    match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Some(hex) => u64::from_str_radix(hex, 16).ok(),
+        None => s.parse().ok(),
+    }
+}
+
 pub fn parse_size(s: &str) -> Option<u64> {
     let s = s.trim();
     let (digits, mult) = match s.get(s.len().saturating_sub(2)..)? {
