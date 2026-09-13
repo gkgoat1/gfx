@@ -25,13 +25,16 @@
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use alloc::vec;
 
 extern crate std;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use gfx_core::{Error, MarkFile, Parser, Pipeline, ParseOptions, Transform, Writer};
+use alloc::collections::{BTreeMap, BTreeSet};
+
+use gfx_core::{write_event, Committish, Error, Event, Mark, MarkFile, Parser, Pipeline, ParseOptions, Transform, Writer};
 
 /// Errors from the driver layer. Subprocess failures keep their captured
 /// stderr; core errors map unchanged at the boundary.
@@ -425,6 +428,26 @@ pub fn transform_stream(
     }
     content.finish(&mut events)?;
 
+    // Snapshot commit/tag events by mark before any content pass, for the
+    // rewrite detection below (remap's canonical-digest contract, plan §7
+    // decision 1, implemented host-side: the driver diffs each mark's event
+    // bytes across the whole content pipeline and flags what changed).
+    #[cfg(feature = "remap")]
+    let mut pre_image: BTreeMap<Mark, Vec<u8>> = BTreeMap::new();
+    #[cfg(feature = "remap")]
+    for ev in &events {
+        let m = match ev {
+            Event::Commit(c) => c.mark,
+            Event::Tag(t) => t.mark,
+            _ => None,
+        };
+        if let Some(m) = m {
+            let mut buf = Vec::new();
+            write_event(ev, &mut buf)?;
+            pre_image.insert(m, buf);
+        }
+    }
+
     #[cfg(feature = "strip-blobs")]
     let mut strip_report = None;
     #[cfg(feature = "strip-blobs")]
@@ -454,10 +477,61 @@ pub fn transform_stream(
         redact_report = Some(r.report());
     }
 
+    // Rewrite detection: a mark is rewritten iff its event bytes changed
+    // across the content passes, or any mark-referenced parent/target was
+    // rewritten. Stream order is topological (parents precede children),
+    // so one forward pass closes the set transitively. OID parents belong
+    // to unchanged lineage (they keep their hashes by definition), so only
+    // marks propagate.
+    #[cfg(feature = "remap")]
+    let rewritten_marks: BTreeSet<Mark> = {
+        let mut all = BTreeSet::new();
+        for ev in &events {
+            let (m, parents) = match ev {
+                Event::Commit(c) => {
+                    let ps: Vec<Mark> = c
+                        .from
+                        .iter()
+                        .chain(c.merges.iter())
+                        .filter_map(|cm| match cm {
+                            Committish::Mark(m) => Some(*m),
+                            _ => None,
+                        })
+                        .collect();
+                    (c.mark, ps)
+                }
+                Event::Tag(t) => {
+                    let ps = match &t.from {
+                        Some(Committish::Mark(m)) => vec![*m],
+                        _ => Vec::new(),
+                    };
+                    (t.mark, ps)
+                }
+                _ => (None, Vec::new()),
+            };
+            if let Some(m) = m {
+                let mut buf = Vec::new();
+                write_event(ev, &mut buf)?;
+                if pre_image.get(&m) != Some(&buf) || parents.iter().any(|p| all.contains(p)) {
+                    all.insert(m);
+                }
+            }
+        }
+        all
+    };
+
     #[cfg(feature = "remap")]
     if let Some(r) = remap.as_mut() {
         let mut next = Vec::new();
         for ev in events.drain(..) {
+            let m = match &ev {
+                Event::Commit(c) => c.mark,
+                Event::Tag(t) => t.mark,
+                _ => None,
+            };
+            if let Some(m) = m.filter(|m| rewritten_marks.contains(m)) {
+                r.flag_mark_rewritten(m);
+            }
             r.apply(ev, &mut next)?;
         }
         r.finish(&mut next)?;

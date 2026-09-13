@@ -35,6 +35,8 @@ pub enum CliError {
     PassOrder(String),
     /// Driver/validation failures.
     Driver(DriverError),
+    /// Multistream archive failures (`pack`/`unpack` subcommands).
+    Pack(gfx_pack::PackError),
     /// Artifact/report writing failure.
     Io(std::io::Error),
     /// The `--config` file is malformed or references unknown passes/flags.
@@ -69,6 +71,7 @@ impl fmt::Display for CliError {
             }
             CliError::PassOrder(msg) => write!(f, "{msg}"),
             CliError::Driver(e) => write!(f, "{e}"),
+            CliError::Pack(e) => write!(f, "{e}"),
             CliError::Io(e) => write!(f, "i/o error: {e}"),
             CliError::BadConfig { file, msg } => write!(f, "bad config file {file}: {msg}"),
         }
@@ -80,6 +83,12 @@ impl std::error::Error for CliError {}
 impl From<DriverError> for CliError {
     fn from(e: DriverError) -> Self {
         CliError::Driver(e)
+    }
+}
+
+impl From<gfx_pack::PackError> for CliError {
+    fn from(e: gfx_pack::PackError) -> Self {
+        CliError::Pack(e)
     }
 }
 

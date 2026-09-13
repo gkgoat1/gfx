@@ -154,11 +154,25 @@ impl PassRegistry {
     /// Usage text derived from the registry (help output stays in sync with
     /// declared specs by construction).
     pub fn usage(&self, binary: &str, about: &str, globals: &[ArgSpec]) -> String {
-        let mut s = alloc::format!("{binary} — {about}\n\n");
-        s.push_str(&format!(
-            "usage: {binary} [--repo <path>] [--force] [--dry-run] \
-             [--passes <spec>] [--pass.<flag> <value>]...\n\n"
-        ));
+        self.usage_with_synopsis(
+            &format!("{binary} — {about}"),
+            &format!(
+                "usage: {binary} [--repo <path>] [--force] [--dry-run] \
+                 [--passes <spec>] [--pass.<flag> <value>]..."
+            ),
+            globals,
+        )
+    }
+
+    /// [`Self::usage`] with a caller-supplied header and synopsis line —
+    /// the `pack` subcommand shares the flag machinery but its own shape.
+    pub fn usage_with_synopsis(
+        &self,
+        header: &str,
+        synopsis: &str,
+        globals: &[ArgSpec],
+    ) -> String {
+        let mut s = alloc::format!("{header}\n\n{synopsis}\n\n");
         s.push_str("global flags:\n");
         for g in globals {
             s.push_str(&format!("  --{:<28} {}\n", g.flag, g.help));

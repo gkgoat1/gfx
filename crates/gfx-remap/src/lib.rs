@@ -162,6 +162,14 @@ impl Remap {
         self.rewritten.insert(mark);
     }
 
+    /// The mark that carried `old`'s `original-oid`, if any. Multistream
+    /// hosts use this with [`Self::outcome`] to resolve recorded source-side
+    /// ref tips into expected post-import marks (plan-multistream-pack.md
+    /// D8).
+    pub fn mark_for(&self, old: &Oid) -> Option<Mark> {
+        self.old_to_mark.get(old).copied()
+    }
+
     /// Pre-finalization view: unchanged commits map to themselves, rewritten
     /// commits map to `None`.
     pub fn commit_map(&self) -> CommitMap {

@@ -55,20 +55,69 @@ pub fn run_rewrite_cli_to(
         Ok(code) => code,
         Err(e) => {
             eprintln!("{binary}: {e}");
-            match e {
-                CliError::UnknownFlag { .. }
-                | CliError::AmbiguousFlag { .. }
-                | CliError::MissingValue { .. }
-                | CliError::BadSize { .. }
-                | CliError::UnexpectedPositional(_)
-                | CliError::UnknownPass { .. }
-                | CliError::PassOrder(_)
-                | CliError::BadConfig { .. }
-                | CliError::FlagConflict(_) => EXIT_USAGE,
-                _ => EXIT_FAILURE,
-            }
+            exit_code_for(&e)
         }
     }
+}
+
+/// Usage errors (exit 2) vs. failures (exit 1), shared by the `rewrite`,
+/// `pack`, and `unpack` CLI surfaces.
+pub(crate) fn exit_code_for(e: &CliError) -> i32 {
+    match e {
+        CliError::UnknownFlag { .. }
+        | CliError::AmbiguousFlag { .. }
+        | CliError::MissingValue { .. }
+        | CliError::BadSize { .. }
+        | CliError::UnexpectedPositional(_)
+        | CliError::UnknownPass { .. }
+        | CliError::PassOrder(_)
+        | CliError::BadConfig { .. }
+        | CliError::FlagConflict(_) => EXIT_USAGE,
+        CliError::Pack(gfx_pack::PackError::Usage(_)) => EXIT_USAGE,
+        _ => EXIT_FAILURE,
+    }
+}
+
+/// Resolve `--passes` against the registry, then validate — the redact
+/// unused-flag guard (plan-redact-idents.md §5.1) and the ordering contract
+/// (remap last, at most once) — *before* any repository is touched (A4).
+/// Shared by the rewrite and pack drivers.
+pub fn resolve_passes_checked(
+    registry: &PassRegistry,
+    map: &crate::args::ArgMap,
+) -> Result<Vec<gfx::driver::PassSpec>, CliError> {
+    let passes_spec = map
+        .value("passes")
+        .map(str::to_string)
+        .unwrap_or_else(|| registry.default_spec());
+    let passes = registry.resolve(&passes_spec, map)?;
+
+    // Unused-flag guard: pass flags given for a pass not named in --passes
+    // are a usage error — silently ignoring them would leave the operator
+    // believing history was redacted.
+    for key in map.keys().map(|k| k.to_string()).collect::<Vec<_>>() {
+        if key.starts_with("redact.") && !passes.iter().any(|p| p.name() == "redact") {
+            return Err(CliError::FlagConflict(format!(
+                "--{key} given but the redact pass is not in --passes; redaction must never be silently skipped"
+            )));
+        }
+    }
+
+    let mut remap_seen = false;
+    for (i, p) in passes.iter().enumerate() {
+        if p.is_remap() {
+            if remap_seen {
+                return Err(CliError::PassOrder("remap named more than once".into()));
+            }
+            if i + 1 != passes.len() {
+                return Err(CliError::PassOrder(
+                    "remap must be the last pass (content passes must precede it)".into(),
+                ));
+            }
+            remap_seen = true;
+        }
+    }
+    Ok(passes)
 }
 
 fn try_run(
@@ -95,42 +144,7 @@ fn try_run(
         crate::config::apply_config_file(&registry, std::path::Path::new(&cfg_path), &mut map)?;
     }
 
-    let passes_spec = map
-        .value("passes")
-        .map(str::to_string)
-        .unwrap_or_else(|| registry.default_spec());
-    let passes = registry.resolve(&passes_spec, &map)?;
-
-    // Validate ordering *before* touching the repository (A4: bad pass
-    // configuration is a usage error with no side effects).
-    // Unused-flag guard (plan-redact-idents.md §5.1, mandatory for
-    // redact): pass flags given for a pass not named in --passes are a
-    // usage error — silently ignoring them would leave the operator
-    // believing history was redacted.
-    for key in map.keys().map(|k| k.to_string()).collect::<Vec<_>>() {
-        if key.starts_with("redact.")
-            && !passes.iter().any(|p| p.name() == "redact")
-        {
-            return Err(CliError::FlagConflict(format!(
-                "--{key} given but the redact pass is not in --passes; redaction must never be silently skipped"
-            )));
-        }
-    }
-
-    let mut remap_seen = false;
-    for (i, p) in passes.iter().enumerate() {
-        if p.is_remap() {
-            if remap_seen {
-                return Err(CliError::PassOrder("remap named more than once".into()));
-            }
-            if i + 1 != passes.len() {
-                return Err(CliError::PassOrder(
-                    "remap must be the last pass (content passes must precede it)".into(),
-                ));
-            }
-            remap_seen = true;
-        }
-    }
+    let passes = resolve_passes_checked(&registry, &map)?;
 
     let mut driver = PassDriver::new(std::path::Path::new(map.value("repo").unwrap_or(".")))?
         .with_passes(passes)?

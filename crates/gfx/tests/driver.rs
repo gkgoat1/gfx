@@ -268,6 +268,27 @@ fn a3_strip_and_remap_end_to_end() {
     // Report says what happened.
     let summary = &report.passes[0].detail;
     assert!(summary.contains("bytes_saved="), "strip report present: {summary}");
+
+    // Regression (canonical-digest bookkeeping, plan §7 decision 1): the
+    // commit-map must be *correct* after a content pass — the stripped tip
+    // commit maps to the OID it actually got on import, and the untouched
+    // root keeps its hash.
+    let map = report.commit_map.expect("remap ran");
+    let mut seen_rewritten = false;
+    for (old, new) in map.iter() {
+        let new = new.expect("post-run map is finalized");
+        // Every new side names a live object in the rewritten repo.
+        git(&bare, &["cat-file", "-e", &new.to_hex().to_string()]);
+        if old != new {
+            seen_rewritten = true;
+        } else {
+            // Unchanged entries genuinely kept their hashes.
+            let hex = String::from_utf8_lossy(&old.to_hex()).into_owned();
+            assert!(root.contains(&hex), "{hex}");
+        }
+    }
+    assert!(seen_rewritten, "strip must flag the rewritten tip commit");
+    assert!(report.commits_rewritten > 0);
 }
 
 #[test]

@@ -24,9 +24,11 @@ extern crate std;
 use std::fmt;
 
 pub mod manifest;
+pub mod pack;
 pub mod zip;
 
 pub use manifest::{Manifest, RefTip, RepoEntry};
+pub use pack::{pack, PackOptions, PackReport, PackRepo, RepoPackReport};
 
 /// Error surface for the whole crate. Zip/manifest structural problems are
 /// plain messages; `git` and driver failures keep their wrapped types.
