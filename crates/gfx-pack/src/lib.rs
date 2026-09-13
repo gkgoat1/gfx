@@ -23,11 +23,13 @@ extern crate std;
 
 use std::fmt;
 
+pub mod crypto;
 pub mod manifest;
 pub mod pack;
 pub mod unpack;
 pub mod zip;
 
+pub use crypto::{passphrase_from_env, parse_identity_file, x25519, EncryptSpec, SecretString, PASSPHRASE_ENV};
 pub use manifest::{Manifest, RefTip, RepoEntry};
 pub use pack::{pack, PackOptions, PackReport, PackRepo, RepoPackReport};
 pub use unpack::{unpack, RepoStatus, RepoUnpackReport, UnpackOptions, UnpackReport};
@@ -47,6 +49,8 @@ pub enum PackError {
     /// Bad CLI/library usage (slug collisions, missing repos, unsafe
     /// destinations).
     Usage(std::string::String),
+    /// age encryption/decryption failures (wrong key, truncation, tampering).
+    Crypto(std::string::String),
     Io(std::io::Error),
     Git(gfx::git::process::GitError),
     Driver(gfx::driver::DriverError),
@@ -62,6 +66,7 @@ impl fmt::Display for PackError {
                 write!(f, "stream checksum mismatch for repo {repo:?}")
             }
             PackError::Usage(m) => write!(f, "{m}"),
+            PackError::Crypto(m) => write!(f, "encryption error: {m}"),
             PackError::Io(e) => write!(f, "i/o error: {e}"),
             PackError::Git(e) => write!(f, "{e}"),
             PackError::Driver(e) => write!(f, "{e}"),

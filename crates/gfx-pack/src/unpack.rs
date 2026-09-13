@@ -41,6 +41,11 @@ pub struct UnpackOptions {
     pub force: bool,
     /// Create non-bare repositories (default: bare).
     pub worktree: bool,
+    /// age identity files for recipient-encrypted archives (D5).
+    pub identity_files: Vec<PathBuf>,
+    /// Passphrase for passphrase-encrypted archives (CLI sources it from
+    /// `GFX_PACK_PASSPHRASE`, never argv).
+    pub passphrase: Option<age::secrecy::SecretString>,
 }
 
 /// Per-repo outcome.
@@ -117,6 +122,12 @@ impl SpoolDir {
         let dir = std::env::temp_dir().join(std::format!("gfx-pack-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir)?;
+        // Decrypted plaintext may land here (D5 safety model).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+        }
         Ok(SpoolDir(dir))
     }
 }
@@ -358,7 +369,27 @@ fn import_one(
 
 /// Run an unpack. See module docs for the flow.
 pub fn unpack(opts: &UnpackOptions) -> Result<UnpackReport, PackError> {
-    let file = std::fs::File::open(&opts.archive)?;
+    // D5: an `.age` archive is decrypted whole into the (0700) spool dir
+    // before the zip layer sees it; the spool dir is removed on drop.
+    let spools = SpoolDir::new("unpack")?;
+    let file = if opts.archive.extension().is_some_and(|e| e == "age") {
+        let ciphertext = std::fs::read(&opts.archive)?;
+        let mut identities = Vec::new();
+        for f in &opts.identity_files {
+            identities.extend(crate::crypto::parse_identity_file(&std::fs::read_to_string(f)?)?);
+        }
+        let plain = crate::crypto::decrypt_bytes(&ciphertext, opts.passphrase.clone(), &identities)?;
+        let path = spools.0.join("archive.gfxpack");
+        std::fs::write(&path, plain)?;
+        std::fs::File::open(path)?
+    } else {
+        if !opts.identity_files.is_empty() || opts.passphrase.is_some() {
+            return Err(PackError::Usage(
+                "--identity / passphrase given but the archive is not .age-encrypted".into(),
+            ));
+        }
+        std::fs::File::open(&opts.archive)?
+    };
     let mut zip = ZipReader::open(file)?;
     let manifest_bytes = zip.extract(MANIFEST_ENTRY)?;
     let manifest_text = String::from_utf8(manifest_bytes)
@@ -375,7 +406,6 @@ pub fn unpack(opts: &UnpackOptions) -> Result<UnpackReport, PackError> {
         }
     }
 
-    let spools = SpoolDir::new("unpack")?;
     let mut reports: Vec<RepoUnpackReport> = Vec::new();
     let mut verified: Vec<(&RepoEntry, Verified)> = Vec::new();
     for entry in &manifest.repos {

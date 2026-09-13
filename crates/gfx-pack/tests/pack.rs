@@ -111,6 +111,7 @@ fn pack_two_repos_structure_and_checksums() {
         out: out.clone(),
         dry_run: false,
         record_source_paths: false,
+        encrypt: None,
     })
     .expect("pack");
 
@@ -168,6 +169,7 @@ fn pack_is_byte_deterministic() {
             out,
             dry_run: false,
             record_source_paths: false,
+            encrypt: None,
         })
         .expect("pack")
     };
@@ -201,6 +203,7 @@ fn redact_ordinals_are_shared_across_repos() {
         out: out.clone(),
         dry_run: false,
         record_source_paths: false,
+        encrypt: None,
     })
     .expect("pack");
 
@@ -242,6 +245,7 @@ fn dry_run_writes_no_archive() {
         out: out.clone(),
         dry_run: true,
         record_source_paths: false,
+        encrypt: None,
     })
     .expect("dry-run pack");
     assert!(report.archive.is_none());
@@ -261,6 +265,7 @@ fn usage_errors_are_caught_early() {
         out: base.join("x.gfxpack"),
         dry_run: false,
         record_source_paths: false,
+        encrypt: None,
     };
     // Duplicate slug.
     assert!(pack(&mk(vec![
@@ -310,6 +315,7 @@ fn strip_blobs_compose_in_pack() {
         out: out.clone(),
         dry_run: false,
         record_source_paths: false,
+        encrypt: None,
     })
     .expect("pack");
 

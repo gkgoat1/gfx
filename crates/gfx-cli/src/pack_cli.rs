@@ -26,6 +26,8 @@ fn pack_globals() -> Vec<ArgSpec> {
         ArgSpec::flag("dry-run", "export, run passes, report — no archive written"),
         ArgSpec::value("config", None, "TOML config file with pass flag defaults (CLI flags override)"),
         ArgSpec::flag("record-source-paths", "record original source paths in meta/source-hints.toml"),
+        ArgSpec::multi("encrypt", "age-encrypt the archive to this age1... recipient (repeatable; output gains .age)"),
+        ArgSpec::flag("encrypt-passphrase", "age-encrypt the archive with a passphrase (from GFX_PACK_PASSPHRASE)"),
         ArgSpec::flag("help", "print this help and exit"),
     ]
 }
@@ -102,6 +104,32 @@ fn try_run_pack(
         ));
     }
 
+    // D5 encryption: recipients XOR passphrase (age itself refuses to mix).
+    let recipients = map.multi("encrypt");
+    let encrypt = if !recipients.is_empty() && map.flag("encrypt-passphrase") {
+        return Err(CliError::FlagConflict(
+            "--encrypt and --encrypt-passphrase are mutually exclusive".into(),
+        ));
+    } else if !recipients.is_empty() {
+        let mut parsed = Vec::new();
+        for r in recipients {
+            parsed.push(r.parse::<gfx_pack::x25519::Recipient>().map_err(|e| {
+                CliError::FlagConflict(format!("bad --encrypt recipient {r:?}: {e}"))
+            })?);
+        }
+        Some(gfx_pack::EncryptSpec::Recipients(parsed))
+    } else if map.flag("encrypt-passphrase") {
+        let pw = gfx_pack::passphrase_from_env().ok_or_else(|| {
+            CliError::FlagConflict(format!(
+                "--encrypt-passphrase needs the passphrase in {}",
+                gfx_pack::PASSPHRASE_ENV
+            ))
+        })?;
+        Some(gfx_pack::EncryptSpec::Passphrase(pw))
+    } else {
+        None
+    };
+
     let report = gfx_pack::pack(&PackOptions {
         repos,
         passes,
@@ -109,6 +137,7 @@ fn try_run_pack(
         out: out_path.unwrap_or_default(),
         dry_run,
         record_source_paths: map.flag("record-source-paths"),
+        encrypt,
     })?;
 
     write!(out, "{}", report.to_text()).map_err(CliError::Io)?;

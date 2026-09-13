@@ -44,6 +44,10 @@ pub struct PackOptions {
     /// Record original source paths in `meta/source-hints.toml` (off by
     /// default — archives do not leak the pack host's layout).
     pub record_source_paths: bool,
+    /// Whole-archive encryption (D5). When set, the archive is age-encrypted
+    /// as it is written and the destination gets an `.age` suffix unless it
+    /// already has one.
+    pub encrypt: Option<crate::crypto::EncryptSpec>,
 }
 
 /// Per-repo outcome summary.
@@ -486,14 +490,74 @@ pub fn pack(opts: &PackOptions) -> Result<PackReport, PackError> {
     }
 
     // 5. Assemble the zip in manifest order, atomically (tmp + rename).
-    let tmp_out = opts.out.with_extension(std::format!(
-        "gfxpack.partial-{}",
+    //    With encryption (D5) the zip is written *through* the age stream —
+    //    plaintext never touches disk — and the destination gains `.age`.
+    let out_path = match &opts.encrypt {
+        Some(_) if !opts.out.extension().is_some_and(|e| e == "age") => {
+            let mut p = opts.out.clone().into_os_string();
+            p.push(".age");
+            PathBuf::from(p)
+        }
+        _ => opts.out.clone(),
+    };
+    let tmp_out = out_path.with_extension(std::format!(
+        "partial-{}",
         std::process::id()
     ));
     let result = (|| -> Result<u64, PackError> {
-        let file = std::fs::File::create(&tmp_out)?;
-        let mut zip = ZipWriter::new(file);
-        zip.write_entry_bytes(MANIFEST_ENTRY, Method::Deflate, manifest_text.as_bytes())?;
+        // The two arms differ only in the sink type; `finish_archive`
+        // carries the shared entry-writing logic. The encrypted arm must
+        // run age's own `finish` after the zip's — it writes the STREAM
+        // trailer, without which the file is undecryptable.
+        match &opts.encrypt {
+            Some(spec) => {
+                let file = std::fs::File::create(&tmp_out)?;
+                let age = crate::crypto::encrypt_writer(file, spec)?;
+                let mut zip = ZipWriter::new(age);
+                finish_archive(&mut zip, &exports, &out_spools, &commit_maps, &ref_maps, &redact_reports, &redact_texts, &reports, &manifest_text, &opts)?;
+                zip.finish()?.finish()?;
+            }
+            None => {
+                let file = std::fs::File::create(&tmp_out)?;
+                let mut zip = ZipWriter::new(file);
+                finish_archive(&mut zip, &exports, &out_spools, &commit_maps, &ref_maps, &redact_reports, &redact_texts, &reports, &manifest_text, &opts)?;
+                zip.finish()?;
+            }
+        }
+        Ok(std::fs::metadata(&tmp_out)?.len())
+    })();
+    let archive_bytes = match result {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp_out);
+            return Err(e);
+        }
+    };
+    std::fs::rename(&tmp_out, &out_path)?;
+
+    Ok(PackReport {
+        repos: reports,
+        archive: Some(out_path),
+        archive_bytes,
+    })
+}
+
+/// Write every archive entry in manifest order. Generic over the sink so
+/// the encryption path is a transparent wrapper (D5).
+#[allow(clippy::too_many_arguments)]
+fn finish_archive<W: Write>(
+    zip: &mut ZipWriter<W>,
+    exports: &[(&PackRepo, PathBuf, gfx::core::ObjectFormat)],
+    out_spools: &[PathBuf],
+    commit_maps: &[String],
+    ref_maps: &[String],
+    redact_reports: &[(String, RedactReport)],
+    redact_texts: &[Option<String>],
+    reports: &[RepoPackReport],
+    manifest_text: &str,
+    opts: &PackOptions,
+) -> Result<(), PackError> {
+    zip.write_entry_bytes(MANIFEST_ENTRY, Method::Deflate, manifest_text.as_bytes())?;
         for (i, (r, _, _)) in exports.iter().enumerate() {
             zip.write_entry(
                 &stream_entry(&r.name),
@@ -529,7 +593,7 @@ pub fn pack(opts: &PackOptions) -> Result<PackReport, PackError> {
         }
         if opts.record_source_paths {
             let mut hints = String::from("[sources]\n");
-            for (r, _, _) in &exports {
+            for (r, _, _) in exports {
                 hints.push_str(&std::format!(
                     "{:?} = {:?}\n",
                     r.name,
@@ -538,23 +602,7 @@ pub fn pack(opts: &PackOptions) -> Result<PackReport, PackError> {
             }
             zip.write_entry_bytes("meta/source-hints.toml", Method::Deflate, hints.as_bytes())?;
         }
-        let file = zip.finish()?;
-        Ok(file.metadata()?.len())
-    })();
-    let archive_bytes = match result {
-        Ok(n) => n,
-        Err(e) => {
-            let _ = std::fs::remove_file(&tmp_out);
-            return Err(e);
-        }
-    };
-    std::fs::rename(&tmp_out, &opts.out)?;
-
-    Ok(PackReport {
-        repos: reports,
-        archive: Some(opts.out.clone()),
-        archive_bytes,
-    })
+        Ok(())
 }
 
 /// Per-repo archived report text (mirrors `RunReport::to_text`).

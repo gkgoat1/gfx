@@ -23,6 +23,7 @@ fn unpack_globals() -> Vec<ArgSpec> {
         ArgSpec::flag("keep-going", "attempt every repo even when some fail; report per-repo status"),
         ArgSpec::flag("force", "allow importing into an existing non-empty destination"),
         ArgSpec::flag("worktree", "create non-bare repositories (default: bare)"),
+        ArgSpec::multi("identity", "age identity file for recipient-encrypted (.age) archives (repeatable)"),
         ArgSpec::flag("help", "print this help and exit"),
     ]
 }
@@ -85,6 +86,8 @@ fn try_run_unpack(out: &mut dyn Write, argv: impl IntoIterator<Item = OsString>)
         keep_going: map.flag("keep-going"),
         force: map.flag("force"),
         worktree: map.flag("worktree"),
+        identity_files: map.multi("identity").iter().map(PathBuf::from).collect(),
+        passphrase: gfx_pack::passphrase_from_env(),
     })?;
 
     write!(out, "{}", report.to_text()).map_err(CliError::Io)?;

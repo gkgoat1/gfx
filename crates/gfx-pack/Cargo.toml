@@ -13,3 +13,4 @@ flate2 = "1"
 crc32fast = "1"
 sha2 = "0.10"
 toml = { version = "0.8", features = ["parse"] }
+age = { version = "0.12", default-features = false, features = ["armor"] }

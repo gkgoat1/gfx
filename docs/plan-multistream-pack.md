@@ -2,10 +2,10 @@
 
 | Field    | Value |
 |----------|-------|
-| Status   | In progress (M0–M2 implemented; M3 encryption next) |
+| Status   | In progress (M0–M3 implemented; M4 parallelism next) |
 | Scope    | New std driver crate `gfx-pack` + two `gfx` subcommands: fan-out export → passes → hash remap → zip (optionally encrypted), and the exact reverse |
 | Depends  | plan-fast-export.md §5–§7 (architecture, builtins, remap), plan-pass-driver-strip-blobs.md §4 (driver, registry), plan-redact-idents.md (redact pass), rewrite-cli.md (user-facing pass surface) |
-| Updated  | 2026-09-13 (M2 unpack driver + CLI; D8 finalization via archived commit-map classification) |
+| Updated  | 2026-09-13 (M3 whole-archive age encryption, zip written through the age stream) |
 
 ---
 

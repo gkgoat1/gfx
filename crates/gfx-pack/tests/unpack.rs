@@ -81,6 +81,7 @@ fn pack_archive(repos: Vec<PackRepo>, passes: Vec<PassSpec>, out: &Path) {
         out: out.to_path_buf(),
         dry_run: false,
         record_source_paths: false,
+        encrypt: None,
     })
     .expect("pack");
 }
@@ -94,6 +95,8 @@ fn default_unpack(archive: &Path, dest_root: &Path) -> UnpackOptions {
         keep_going: false,
         force: false,
         worktree: false,
+        identity_files: vec![],
+        passphrase: None,
     }
 }
 
