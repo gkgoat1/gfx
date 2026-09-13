@@ -149,6 +149,40 @@ pub mod process {
         Ok(())
     }
 
+    /// `git init` a fresh repository at `path` (created when missing),
+    /// with an explicit object format. Used by the unpack driver
+    /// (plan-multistream-pack.md M2): destinations are bare by default.
+    /// Unlike the other helpers this cannot use `-C` — the directory may
+    /// not exist yet — so the target is a positional argument.
+    pub fn init(path: &Path, bare: bool, format: gfx_core::ObjectFormat) -> Result<(), GitError> {
+        let fmt = match format {
+            gfx_core::ObjectFormat::Sha1 => "sha1",
+            gfx_core::ObjectFormat::Sha256 => "sha256",
+        };
+        let mut cmd = Command::new("git");
+        cmd.arg("init").arg("-q");
+        if bare {
+            cmd.arg("--bare");
+        }
+        let out = cmd
+            .arg(format!("--object-format={fmt}"))
+            .arg(path)
+            .output()
+            .map_err(|e| GitError {
+                command: format!("init {}", path.display()),
+                status: None,
+                stderr: format!("failed to spawn git: {e}"),
+            })?;
+        if !out.status.success() {
+            return Err(GitError {
+                command: format!("init {}", path.display()),
+                status: out.status.code(),
+                stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            });
+        }
+        Ok(())
+    }
+
     /// Absolute path of the repo's git dir. (Absolute matters: `git -C`
     /// chdirs the subprocess, so any path argument we hand to `fast-import`
     /// must not be relative to *our* cwd.)

@@ -21,6 +21,7 @@ fn main() {
             factories(),
             argv.into_iter().skip(1),
         ),
+        Some("unpack") => gfx_cli::run_unpack_cli_to(&mut std::io::stdout(), argv.into_iter().skip(1)),
         _ => gfx_cli::run_rewrite_cli_to(
             &mut std::io::stdout(),
             "gfx",

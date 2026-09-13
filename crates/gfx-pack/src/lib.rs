@@ -25,10 +25,12 @@ use std::fmt;
 
 pub mod manifest;
 pub mod pack;
+pub mod unpack;
 pub mod zip;
 
 pub use manifest::{Manifest, RefTip, RepoEntry};
 pub use pack::{pack, PackOptions, PackReport, PackRepo, RepoPackReport};
+pub use unpack::{unpack, RepoStatus, RepoUnpackReport, UnpackOptions, UnpackReport};
 
 /// Error surface for the whole crate. Zip/manifest structural problems are
 /// plain messages; `git` and driver failures keep their wrapped types.
