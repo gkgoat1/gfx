@@ -48,6 +48,12 @@ pub struct PackOptions {
     /// as it is written and the destination gets an `.age` suffix unless it
     /// already has one.
     pub encrypt: Option<crate::crypto::EncryptSpec>,
+    /// Worker threads for export/transform (D6). `None` or `Some(0)` uses
+    /// available parallelism. Archive assembly stays single-threaded, so
+    /// output bytes are independent of this setting.
+    pub jobs: Option<usize>,
+    /// Emit per-repo progress lines to stderr.
+    pub progress: bool,
 }
 
 /// Per-repo outcome summary.
@@ -393,35 +399,114 @@ fn validate_passes(passes: &[PassSpec]) -> Result<Vec<PassSpec>, PackError> {
     Ok(out)
 }
 
+/// One repo's transformed artifacts, collected from a worker (D6).
+struct RepoArtifacts {
+    entry: RepoEntry,
+    report: RepoPackReport,
+    commit_map: String,
+    ref_map: String,
+    redact: Option<(RedactReport, String)>,
+    out_spool: PathBuf,
+}
+
+/// Run `f` over `0..n` on a bounded scoped-thread pool, collecting results
+/// in index order. The first error wins after in-flight workers finish;
+/// panics in workers are surfaced as errors, never swallowed (D7).
+fn run_pool<T, F>(n: usize, jobs: usize, f: F) -> Result<Vec<T>, PackError>
+where
+    T: Send,
+    F: Fn(usize) -> Result<T, PackError> + Sync,
+{
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    let workers = jobs.max(1).min(n);
+    let next = AtomicU64::new(0);
+    let (tx, rx) = std::sync::mpsc::channel::<(usize, Result<T, PackError>)>();
+    std::thread::scope(|s| {
+        for _ in 0..workers {
+            let f = &f;
+            let tx = tx.clone();
+            let next = &next;
+            s.spawn(move || loop {
+                let i = next.fetch_add(1, Ordering::SeqCst) as usize;
+                if i >= n {
+                    break;
+                }
+                let r = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(i))) {
+                    Ok(r) => r,
+                    Err(p) => {
+                        let msg = p
+                            .downcast_ref::<&str>()
+                            .map(|s| s.to_string())
+                            .or_else(|| p.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "unknown panic".into());
+                        Err(PackError::Usage(std::format!("worker {i} panicked: {msg}")))
+                    }
+                };
+                // Receiver lives until all `n` results are collected.
+                let _ = tx.send((i, r));
+            });
+        }
+        drop(tx);
+        let mut results: Vec<Option<T>> = (0..n).map(|_| None).collect();
+        let mut first_err: Option<PackError> = None;
+        for (i, r) in rx.into_iter().take(n) {
+            match r {
+                Ok(v) => results[i] = Some(v),
+                Err(e) => {
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                }
+            }
+        }
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(results
+                .into_iter()
+                .map(|r| r.expect("every index reported"))
+                .collect()),
+        }
+    })
+}
+
 /// Run a pack. See module docs for the flow.
 pub fn pack(opts: &PackOptions) -> Result<PackReport, PackError> {
     validate_repos(&opts.repos)?;
     let passes = validate_passes(&opts.passes)?;
     let spools = SpoolDir::new("run")?;
+    let n = opts.repos.len();
+    let jobs = opts
+        .jobs
+        .filter(|j| *j > 0)
+        .or_else(|| std::thread::available_parallelism().map(|p| p.get()).ok())
+        .unwrap_or(1);
 
     // 1. Export each repo (read-only) to a spool; record object format.
-    let mut exports: Vec<(&PackRepo, PathBuf, gfx::core::ObjectFormat)> = Vec::new();
-    for r in &opts.repos {
+    //    Parallel (D6): subprocess-bound and independent per repo.
+    let exports: Vec<(PathBuf, gfx::core::ObjectFormat)> = run_pool(n, jobs, |i| {
+        let r = &opts.repos[i];
         let fmt = git::object_format(&r.path)?;
         let bytes = git::export_stream(&r.path, &[])?;
         let spool = spools.join(&std::format!("export-{}.fi", r.name));
         std::fs::write(&spool, &bytes)?;
-        exports.push((r, spool, fmt));
-    }
+        if opts.progress {
+            eprintln!("gfx pack: [{}/{}] {} exported ({} bytes)", i + 1, n, r.name, bytes.len());
+        }
+        Ok((spool, fmt))
+    })?;
 
-    // 2. D3 shared ordinal idents.
-    let spool_paths: Vec<PathBuf> = exports.iter().map(|(_, p, _)| p.clone()).collect();
+    // 2. D3 shared ordinal idents (sequential pre-scan over all exports).
+    let spool_paths: Vec<PathBuf> = exports.iter().map(|(p, _)| p.clone()).collect();
     let (passes, shared_idents) = resolve_shared_idents(&spool_paths, &passes)?;
 
-    // 3. Transform each repo; spool the output with its checksum.
-    let mut entries: Vec<RepoEntry> = Vec::new();
-    let mut reports: Vec<RepoPackReport> = Vec::new();
-    let mut out_spools: Vec<PathBuf> = Vec::new();
-    let mut commit_maps: Vec<String> = Vec::new();
-    let mut ref_maps: Vec<String> = Vec::new();
-    let mut redact_reports: Vec<(String, RedactReport)> = Vec::new();
-    let mut redact_texts: Vec<Option<String>> = Vec::new();
-    for (r, spool_in, fmt) in &exports {
+    // 3. Transform each repo in parallel; spool the output with its
+    //    checksum. Results stay in repo order regardless of completion
+    //    order — assembly is deterministic (D6).
+    let artifacts: Vec<RepoArtifacts> = run_pool(n, jobs, |i| {
+        let r = &opts.repos[i];
+        let (spool_in, fmt) = &exports[i];
         let input = std::fs::read(spool_in)?;
         let out = transform_stream(&input, &passes)?;
         let spool_out = spools.join(&std::format!("stream-{}.fi", r.name));
@@ -430,8 +515,6 @@ pub fn pack(opts: &PackOptions) -> Result<PackReport, PackError> {
         let remap = out.remap.as_ref().expect("remap always composes last");
         let commit_map = out.commit_map.as_ref().expect("remap always composes last");
         let tips = ref_tips(&r.path, *fmt, remap)?;
-        let cm_text = commit_map_text(commit_map);
-        let rm_text = ref_map_text(&tips);
 
         let mut passes_summary = out.passes.clone();
         if shared_idents {
@@ -441,39 +524,67 @@ pub fn pack(opts: &PackOptions) -> Result<PackReport, PackError> {
                 }
             }
         }
-        entries.push(RepoEntry {
-            name: r.name.clone(),
-            stream: stream_entry(&r.name),
-            object_format: *fmt,
-            sha256: sha256.clone(),
-            bytes: out.output.len() as u64,
-            commits: out.commits_observed as u64,
-            rewritten: out.commits_rewritten as u64,
-            identity: out.identity,
-            refs: tips,
-        });
-        reports.push(RepoPackReport {
-            name: r.name.clone(),
-            commits: out.commits_observed as u64,
-            rewritten: out.commits_rewritten as u64,
-            input_bytes: out.input_bytes,
-            output_bytes: out.output.len(),
-            identity: out.identity,
-            sha256,
-            passes: passes_summary.clone(),
-        });
-        if let Some(rr) = &out.redact_report {
-            redact_reports.push((r.name.clone(), rr.clone()));
-            redact_texts.push(Some(rr.to_text()));
+        if opts.progress {
+            eprintln!(
+                "gfx pack: [{}/{}] {} transformed ({} -> {} bytes)",
+                i + 1,
+                n,
+                r.name,
+                out.input_bytes,
+                out.output.len()
+            );
+        }
+        let ref_map = ref_map_text(&tips);
+        Ok(RepoArtifacts {
+            entry: RepoEntry {
+                name: r.name.clone(),
+                stream: stream_entry(&r.name),
+                object_format: *fmt,
+                sha256: sha256.clone(),
+                bytes: out.output.len() as u64,
+                commits: out.commits_observed as u64,
+                rewritten: out.commits_rewritten as u64,
+                identity: out.identity,
+                refs: tips,
+            },
+            report: RepoPackReport {
+                name: r.name.clone(),
+                commits: out.commits_observed as u64,
+                rewritten: out.commits_rewritten as u64,
+                input_bytes: out.input_bytes,
+                output_bytes: out.output.len(),
+                identity: out.identity,
+                sha256,
+                passes: passes_summary,
+            },
+            commit_map: commit_map_text(commit_map),
+            ref_map,
+            redact: out.redact_report.as_ref().map(|rr| (rr.clone(), rr.to_text())),
+            out_spool: spool_out,
+        })
+    })?;
+
+    // 4. Manifest.
+    let mut entries: Vec<RepoEntry> = Vec::new();
+    let mut reports: Vec<RepoPackReport> = Vec::new();
+    let mut out_spools: Vec<PathBuf> = Vec::new();
+    let mut commit_maps: Vec<String> = Vec::new();
+    let mut ref_maps: Vec<String> = Vec::new();
+    let mut redact_reports: Vec<(String, RedactReport)> = Vec::new();
+    let mut redact_texts: Vec<Option<String>> = Vec::new();
+    for a in artifacts {
+        if let Some((rr, text)) = a.redact {
+            redact_reports.push((a.entry.name.clone(), rr));
+            redact_texts.push(Some(text));
         } else {
             redact_texts.push(None);
         }
-        commit_maps.push(cm_text);
-        ref_maps.push(rm_text);
-        out_spools.push(spool_out);
+        entries.push(a.entry);
+        reports.push(a.report);
+        out_spools.push(a.out_spool);
+        commit_maps.push(a.commit_map);
+        ref_maps.push(a.ref_map);
     }
-
-    // 4. Manifest.
     let manifest = Manifest {
         passes: passes.iter().map(|p| p.name().to_string()).collect(),
         flags: opts.flags_audit.clone(),
@@ -514,13 +625,13 @@ pub fn pack(opts: &PackOptions) -> Result<PackReport, PackError> {
                 let file = std::fs::File::create(&tmp_out)?;
                 let age = crate::crypto::encrypt_writer(file, spec)?;
                 let mut zip = ZipWriter::new(age);
-                finish_archive(&mut zip, &exports, &out_spools, &commit_maps, &ref_maps, &redact_reports, &redact_texts, &reports, &manifest_text, &opts)?;
+                finish_archive(&mut zip, &opts.repos, &out_spools, &commit_maps, &ref_maps, &redact_reports, &redact_texts, &reports, &manifest_text, &opts)?;
                 zip.finish()?.finish()?;
             }
             None => {
                 let file = std::fs::File::create(&tmp_out)?;
                 let mut zip = ZipWriter::new(file);
-                finish_archive(&mut zip, &exports, &out_spools, &commit_maps, &ref_maps, &redact_reports, &redact_texts, &reports, &manifest_text, &opts)?;
+                finish_archive(&mut zip, &opts.repos, &out_spools, &commit_maps, &ref_maps, &redact_reports, &redact_texts, &reports, &manifest_text, &opts)?;
                 zip.finish()?;
             }
         }
@@ -547,7 +658,7 @@ pub fn pack(opts: &PackOptions) -> Result<PackReport, PackError> {
 #[allow(clippy::too_many_arguments)]
 fn finish_archive<W: Write>(
     zip: &mut ZipWriter<W>,
-    exports: &[(&PackRepo, PathBuf, gfx::core::ObjectFormat)],
+    repos: &[PackRepo],
     out_spools: &[PathBuf],
     commit_maps: &[String],
     ref_maps: &[String],
@@ -558,7 +669,7 @@ fn finish_archive<W: Write>(
     opts: &PackOptions,
 ) -> Result<(), PackError> {
     zip.write_entry_bytes(MANIFEST_ENTRY, Method::Deflate, manifest_text.as_bytes())?;
-        for (i, (r, _, _)) in exports.iter().enumerate() {
+        for (i, r) in repos.iter().enumerate() {
             zip.write_entry(
                 &stream_entry(&r.name),
                 Method::Deflate,
@@ -593,7 +704,7 @@ fn finish_archive<W: Write>(
         }
         if opts.record_source_paths {
             let mut hints = String::from("[sources]\n");
-            for (r, _, _) in exports {
+            for r in repos {
                 hints.push_str(&std::format!(
                     "{:?} = {:?}\n",
                     r.name,

@@ -112,6 +112,8 @@ fn pack_two_repos_structure_and_checksums() {
         dry_run: false,
         record_source_paths: false,
         encrypt: None,
+        jobs: None,
+        progress: false,
     })
     .expect("pack");
 
@@ -170,6 +172,8 @@ fn pack_is_byte_deterministic() {
             dry_run: false,
             record_source_paths: false,
             encrypt: None,
+            jobs: None,
+            progress: false,
         })
         .expect("pack")
     };
@@ -181,6 +185,43 @@ fn pack_is_byte_deterministic() {
         "identical inputs ⇒ identical archive bytes (D4)"
     );
     assert_eq!(r1.repos[0].sha256, r2.repos[0].sha256);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn pack_is_deterministic_under_parallelism() {
+    // D6: archive bytes are independent of worker count and completion
+    // order. Four repos, redact (forces the shared-ordinal pre-scan), jobs
+    // 1 vs 4 ⇒ byte-identical archives.
+    let base = tmpdir("par");
+    let repos: Vec<PackRepo> = ["r1", "r2", "r3", "r4"]
+        .iter()
+        .map(|n| PackRepo {
+            name: n.to_string(),
+            path: make_repo(&base, n, "Alice|alice@x.com", "Alice|alice@x.com"),
+        })
+        .collect();
+    let mk = |jobs: Option<usize>, out: PathBuf| {
+        pack(&PackOptions {
+            repos: repos.clone(),
+            passes: vec![redact_ordinal()],
+            flags_audit: Default::default(),
+            out,
+            dry_run: false,
+            record_source_paths: false,
+            encrypt: None,
+            jobs,
+            progress: false,
+        })
+        .expect("pack")
+    };
+    mk(Some(1), base.join("j1.gfxpack"));
+    mk(Some(4), base.join("j4.gfxpack"));
+    assert_eq!(
+        std::fs::read(base.join("j1.gfxpack")).unwrap(),
+        std::fs::read(base.join("j4.gfxpack")).unwrap(),
+        "jobs=1 and jobs=4 produce identical archives"
+    );
     let _ = std::fs::remove_dir_all(&base);
 }
 
@@ -204,6 +245,8 @@ fn redact_ordinals_are_shared_across_repos() {
         dry_run: false,
         record_source_paths: false,
         encrypt: None,
+        jobs: None,
+        progress: false,
     })
     .expect("pack");
 
@@ -246,6 +289,8 @@ fn dry_run_writes_no_archive() {
         dry_run: true,
         record_source_paths: false,
         encrypt: None,
+        jobs: None,
+        progress: false,
     })
     .expect("dry-run pack");
     assert!(report.archive.is_none());
@@ -266,6 +311,8 @@ fn usage_errors_are_caught_early() {
         dry_run: false,
         record_source_paths: false,
         encrypt: None,
+        jobs: None,
+        progress: false,
     };
     // Duplicate slug.
     assert!(pack(&mk(vec![
@@ -316,6 +363,8 @@ fn strip_blobs_compose_in_pack() {
         dry_run: false,
         record_source_paths: false,
         encrypt: None,
+        jobs: None,
+        progress: false,
     })
     .expect("pack");
 

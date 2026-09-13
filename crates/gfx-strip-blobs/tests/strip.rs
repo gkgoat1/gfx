@@ -466,7 +466,7 @@ fn s3_deterministic_with_injected_predicate() {
         }
     }
     let cfg = StripBlobsConfig {
-        extra_predicates: vec![SharedPredicate(std::rc::Rc::new(PureBig))],
+        extra_predicates: vec![SharedPredicate(std::sync::Arc::new(PureBig))],
         ..StripBlobsConfig::default()
     };
     let events = sample_history();
@@ -481,18 +481,18 @@ fn verdicts_are_not_cached_across_reset() {
     // The plan's cache check: a call-counting predicate proves reset()
     // clears the verdict registry — pass 2 must consult the predicate
     // again (calls increase) and reach the same verdicts.
-    use core::cell::Cell;
+    use std::sync::atomic::{AtomicU64, Ordering};
     struct Counting {
-        calls: Cell<u64>,
+        calls: AtomicU64,
     }
     impl BlobPredicate for Counting {
         fn judge(&self, _path: Option<&BString>, data: &[u8]) -> bool {
-            self.calls.set(self.calls.get() + 1);
+            self.calls.fetch_add(1, Ordering::SeqCst);
             data.len() > 50
         }
     }
-    let counter = std::rc::Rc::new(Counting {
-        calls: Cell::new(0),
+    let counter = std::sync::Arc::new(Counting {
+        calls: AtomicU64::new(0),
     });
     let cfg = StripBlobsConfig {
         extra_predicates: vec![SharedPredicate(counter.clone())],
@@ -506,7 +506,7 @@ fn verdicts_are_not_cached_across_reset() {
         t.apply(ev.clone(), &mut out1).unwrap();
     }
     t.finish(&mut out1).unwrap();
-    let calls_pass1 = counter.calls.get();
+    let calls_pass1 = counter.calls.load(Ordering::SeqCst);
     assert!(calls_pass1 > 0, "predicate consulted during pass 1");
 
     t.reset();
@@ -515,7 +515,7 @@ fn verdicts_are_not_cached_across_reset() {
         t.apply(ev, &mut out2).unwrap();
     }
     t.finish(&mut out2).unwrap();
-    let calls_pass2 = counter.calls.get();
+    let calls_pass2 = counter.calls.load(Ordering::SeqCst);
     assert!(
         calls_pass2 > calls_pass1,
         "reset() must clear cached verdicts; predicate was not consulted again"

@@ -44,7 +44,7 @@ pub use signals::ContentSignals;
 /// Host-compiled path matcher (plan §5.2 knob 3): the `regex` crate stays
 /// out of `no_std`; hosts pre-compile and inject. Shared by reference
 /// (`Rc`) so the config stays cheaply clonable for `reset()`.
-pub trait PathMatcher {
+pub trait PathMatcher: Send + Sync {
     fn matches(&self, path: &[u8]) -> bool;
 
     /// Debug output without requiring `Clone` bounds on implementations.
@@ -56,7 +56,7 @@ pub trait PathMatcher {
 /// Newtype for `Debug`/`Clone` on the shared matcher (orphan rule: we own
 /// the newtype, not `Rc`).
 #[derive(Clone)]
-pub struct SharedMatcher(pub alloc::rc::Rc<dyn PathMatcher>);
+pub struct SharedMatcher(pub alloc::sync::Arc<dyn PathMatcher>);
 
 impl core::fmt::Debug for SharedMatcher {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -67,7 +67,7 @@ impl core::fmt::Debug for SharedMatcher {
 /// Host-injected pure predicate (plan §5.2 knob 5). Contract: a pure
 /// function of `(path, bytes)` — stateful predicates break determinism (P6)
 /// and are rejected by the test kit's stateful-predicate check.
-pub trait BlobPredicate {
+pub trait BlobPredicate: Send + Sync {
     fn judge(&self, path: Option<&BString>, data: &[u8]) -> bool;
 
     /// Debug output without requiring `Clone` bounds on implementations.
@@ -78,7 +78,7 @@ pub trait BlobPredicate {
 
 /// Newtype for `Debug`/`Clone` on the shared predicate (orphan rule).
 #[derive(Clone)]
-pub struct SharedPredicate(pub alloc::rc::Rc<dyn BlobPredicate>);
+pub struct SharedPredicate(pub alloc::sync::Arc<dyn BlobPredicate>);
 
 impl core::fmt::Debug for SharedPredicate {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

@@ -82,6 +82,8 @@ fn pack_archive(repos: Vec<PackRepo>, passes: Vec<PassSpec>, out: &Path) {
         dry_run: false,
         record_source_paths: false,
         encrypt: None,
+        jobs: None,
+        progress: false,
     })
     .expect("pack");
 }

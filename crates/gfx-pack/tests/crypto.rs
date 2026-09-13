@@ -70,6 +70,8 @@ fn encrypted_recipient_round_trip() {
         dry_run: false,
         record_source_paths: false,
         encrypt: Some(EncryptSpec::Recipients(vec![id.to_public()])),
+        jobs: None,
+        progress: false,
     })
     .expect("pack");
 
@@ -116,6 +118,8 @@ fn encrypted_passphrase_round_trip_and_wrong_pass() {
         dry_run: false,
         record_source_paths: false,
         encrypt: Some(EncryptSpec::Passphrase(SecretString::from("hunter2"))),
+        jobs: None,
+        progress: false,
     })
     .expect("pack");
 

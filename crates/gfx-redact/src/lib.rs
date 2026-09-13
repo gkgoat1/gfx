@@ -26,7 +26,7 @@ mod time;
 
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::format;
-use alloc::rc::Rc;
+use alloc::sync::Arc;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -61,8 +61,9 @@ impl IdentRole {
 /// shared mutable state. Determinism (plan R2) is a documented requirement;
 /// the pass audits *injectivity* rather than trusting it: two distinct
 /// originals mapped to one replacement surface as `collision` entries in the
-/// report, never silently.
-pub trait IdentPolicy {
+/// report, never silently. `Send + Sync` so multistream hosts can fan the
+/// pass out across worker threads (plan-multistream-pack.md D6).
+pub trait IdentPolicy: Send + Sync {
     fn rewrite(&self, role: IdentRole, ident: &Ident) -> Ident;
 
     /// Human-readable description for report/artifact headers.
@@ -73,7 +74,7 @@ pub trait IdentPolicy {
 
 /// `Clone`able shared handle to a host policy (the `SharedMatcher` pattern).
 #[derive(Clone)]
-pub struct SharedPolicy(pub Rc<dyn IdentPolicy>);
+pub struct SharedPolicy(pub Arc<dyn IdentPolicy>);
 
 impl core::fmt::Debug for SharedPolicy {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

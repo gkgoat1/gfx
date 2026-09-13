@@ -182,11 +182,10 @@ fn r2_deterministic_with_table_and_injected_policy() {
 
     // Stateful injected policy: must still be deterministic because a fresh
     // transform is constructed per run (host contract: pure per-run).
-    struct Counting(core::cell::Cell<u32>);
+    struct Counting(std::sync::atomic::AtomicU32);
     impl IdentPolicy for Counting {
         fn rewrite(&self, _role: IdentRole, ident: &Ident) -> Ident {
-            let n = self.0.get() + 1;
-            self.0.set(n);
+            let n = self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
             Ident {
                 name: b("P"),
                 email: b(&format!("p{n}@invalid")),
@@ -196,7 +195,7 @@ fn r2_deterministic_with_table_and_injected_policy() {
     }
     let counting = || {
         Redact::new(RedactConfig {
-            ident_mode: IdentMode::Injected(SharedPolicy(Rc::new(Counting(core::cell::Cell::new(0))))),
+            ident_mode: IdentMode::Injected(SharedPolicy(std::sync::Arc::new(Counting(std::sync::atomic::AtomicU32::new(0))))),
             ..RedactConfig::default()
         })
     };
