@@ -427,7 +427,7 @@ input bytes, so the map is the only bridge back).
 
 | # | Property |
 |---|---|
-| R1 | Empty policy (`preserve` + `preserve` + no rows) ⇒ byte-identical output (P4 analog), including untouched ledger bookkeeping |
+| R1 | Empty policy with `keep-tz` (`preserve` + no rows) ⇒ byte-identical output (P4 analog), including untouched ledger bookkeeping; without `keep-tz` the empty policy still zeroes offsets (decision D3: always-on tz zeroing) |
 | R2 | Determinism: two runs byte-identical; with an injected policy; `reset()` re-derives (call-counting policy, strip S3 analog) |
 | R3 | Injectivity of built-in modes: distinct original idents ⇒ distinct replacements across a synthetic corpus; collision entries exist **only** where table/policy rows demand them |
 | R4 | **Leak scan**: for a corpus with known idents/times, the serialized output contains none of the original name/email byte-strings, no original `±HHMM` offsets (non-`keep-tz`), and no original `epoch` raw bytes in `zero`/`bucket`/`fuzz` modes |

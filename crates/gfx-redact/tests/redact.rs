@@ -5,7 +5,10 @@
 use gfx_core::prelude::*;
 use gfx_core::test_kit;
 use gfx_redact::quote::c_unquote;
-use gfx_redact::{IdentMode, IdentPolicy, IdentRole, Redact, RedactConfig, RedactRow, SharedPolicy};
+use gfx_redact::{
+    IdentMode, IdentPolicy, IdentRole, PseudonymStyle, Redact, RedactConfig, RedactRow,
+    RedactReport, SharedPolicy, TimeBucketUnit, TimeMode,
+};
 
 use std::rc::Rc;
 
@@ -118,13 +121,36 @@ fn stream_bytes() -> Vec<u8> {
 
 // ---------------------------------------------------------------- R1
 
-/// R1: empty policy (preserve idents, preserve times) ⇒ byte-identical
-/// output, including untouched ledger bookkeeping.
+/// R1: empty policy with `keep_tz` (preserve idents, preserve times, keep
+/// offsets) ⇒ byte-identical output, including untouched ledger
+/// bookkeeping.
 #[test]
 fn r1_identity_empty_policy() {
     let input = stream_bytes();
+    let cfg = RedactConfig {
+        keep_tz: true,
+        ..RedactConfig::default()
+    };
+    let output = roundtrip(&input, cfg);
+    assert_eq!(output, input, "empty policy + keep_tz must be a byte-identity no-op");
+}
+
+/// D3 (resolved Q2): under `preserve`, timezone offsets are zeroed by
+/// default — they are geographic metadata — while epochs stay untouched.
+#[test]
+fn d3_preserve_still_zeroes_tz_by_default() {
+    let input = stream_bytes();
     let output = roundtrip(&input, RedactConfig::default());
-    assert_eq!(output, input, "empty policy must be a byte-identity no-op");
+    let out = String::from_utf8(output).unwrap();
+    // Offsets from the fixture: +0200, -0730, +0000, +0545 — all gone.
+    assert!(!out.contains("+0200"));
+    assert!(!out.contains("-0730"));
+    assert!(!out.contains("+0545"));
+    // Epochs untouched (preserve mode keeps the time axis).
+    assert!(out.contains("1700000000 +0000"));
+    assert!(out.contains("1700000100 +0000"));
+    assert!(out.contains("1700000200 +0000"));
+    assert!(out.contains("1700000300 +0000"));
 }
 
 /// R1 (event level): blobs, resets, and every non-ident field pass through.
@@ -572,11 +598,427 @@ fn edge_identity_pin() {
 #[test]
 fn full_stream_table_pin_is_byte_identity() {
     let input = stream_bytes();
-    let cfg = table_cfg(vec![
-        row("Alice", "alice@example.com", "Alice", "alice@example.com"),
-        row("Bob", "bob@example.org", "Bob", "bob@example.org"),
-        row("Tagr", "tagr@example.net", "Tagr", "tagr@example.net"),
-    ]);
+    let cfg = RedactConfig {
+        ident_mode: IdentMode::Table(vec![
+            row("Alice", "alice@example.com", "Alice", "alice@example.com"),
+            row("Bob", "bob@example.org", "Bob", "bob@example.org"),
+            row("Tagr", "tagr@example.net", "Tagr", "tagr@example.net"),
+        ]),
+        keep_tz: true,
+        ..RedactConfig::default()
+    };
     let output = roundtrip(&input, cfg);
     assert_eq!(output, input);
+}
+
+// ---------------------------------------------------------------- M1
+
+/// Canonical raw validator for the R7 property: `^-?\d+ [+-]\d{4}$`.
+fn is_canonical_raw(raw: &[u8]) -> bool {
+    let s = match std::str::from_utf8(raw) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    let (epoch, tz) = match s.split_once(' ') {
+        Some(p) => p,
+        None => return false,
+    };
+    let digits = epoch.strip_prefix('-').unwrap_or(epoch);
+    !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && (digits.len() == 1 || !digits.starts_with('0'))
+        && tz.len() == 5
+        && (tz.starts_with('+') || tz.starts_with('-'))
+        && tz[1..].bytes().all(|b| b.is_ascii_digit())
+}
+
+fn corpus_events() -> Vec<Event> {
+    vec![
+        commit_ev(
+            "refs/heads/main",
+            1,
+            Some(ident("Alice", "alice@example.com", ts("1700000000 +0200", 1_700_000_000, 120))),
+            Some(ident("Bob", "bob@example.org", ts("1700000100 -0730", 1_700_000_100, -450))),
+        ),
+        commit_ev(
+            "refs/heads/main",
+            2,
+            Some(ident("Cara", "cara@example.io", ts("1700086400 +0000", 1_700_086_400, 0))),
+            None,
+        ),
+        tag_ev(
+            "v1",
+            Some(ident("Tagr", "tagr@example.net", ts("1700172800 +0545", 1_700_172_800, 345))),
+        ),
+    ]
+}
+
+fn run_events(cfg: RedactConfig, events: &[Event]) -> (Vec<Event>, RedactReport) {
+    let mut r = Redact::new(cfg);
+    let mut out = Vec::new();
+    for ev in events {
+        r.apply(ev.clone(), &mut out).unwrap();
+    }
+    r.finish(&mut out).unwrap();
+    let rep = r.report();
+    (out, rep)
+}
+
+/// R4 (leak scan): under a redacting time mode, no original ident bytes and
+/// no original time bytes survive the serialized stream.
+#[test]
+fn r4_leak_scan_zero_mode() {
+    let cfg = RedactConfig {
+        ident_mode: IdentMode::Pseudonymize(PseudonymStyle::Ordinal),
+        time_mode: TimeMode::Zero,
+        ..RedactConfig::default()
+    };
+    let (out, rep) = run_events(cfg, &corpus_events());
+    let mut w = Writer::new();
+    for ev in &out {
+        w.write(ev).unwrap();
+    }
+    let text = String::from_utf8(w.take()).unwrap();
+    for name in ["Alice", "alice@example.com", "Bob", "bob@example.org", "Cara", "cara@example.io", "Tagr", "tagr@example.net"] {
+        assert!(!text.contains(name), "original ident {name} leaked");
+    }
+    for raw in ["1700000000 +0200", "1700000100 -0730", "1700086400 +0000", "1700172800 +0545"] {
+        assert!(!text.contains(raw), "original time {raw} leaked");
+    }
+    assert_eq!(rep.totals.times_altered, 4);
+    assert_eq!(rep.totals.idents_redacted, 4);
+    // every output ident is a pseudonym
+    assert!(text.contains("User 1 <user1@example.invalid>"));
+}
+
+/// R4/R6: `shift` preserves order and intervals exactly (documented leak),
+/// zeroes tz unless `keep_tz`, and errors on overflow.
+#[test]
+fn r6_shift_ordering_and_keep_tz() {
+    let cfg = RedactConfig {
+        time_mode: TimeMode::Shift(31_536_000),
+        ..RedactConfig::default()
+    };
+    let (out, _) = run_events(cfg, &corpus_events());
+    let mut epochs = Vec::new();
+    for ev in &out {
+        if let Event::Commit(c) = ev {
+            if let Some(cm) = &c.committer {
+                epochs.push(cm.time.epoch);
+            }
+        }
+    }
+    assert_eq!(epochs, vec![1_700_000_100 + 31_536_000]);
+    // tz zeroed by default under shift
+    if let Event::Commit(c) = &out[0] {
+        assert_eq!(c.committer.as_ref().unwrap().time.tz_offset_min, 0);
+        assert_eq!(c.committer.as_ref().unwrap().time.raw, b("1731536100 +0000"));
+    }
+
+    // keep_tz rides along under shift.
+    let cfg = RedactConfig {
+        time_mode: TimeMode::Shift(31_536_000),
+        keep_tz: true,
+        ..RedactConfig::default()
+    };
+    let (out, _) = run_events(cfg, &corpus_events());
+    if let Event::Commit(c) = &out[0] {
+        let t = &c.committer.as_ref().unwrap().time;
+        assert_eq!(t.tz_offset_min, -450);
+        assert_eq!(t.raw, b("1731536100 -0730"));
+    }
+
+    // Overflow is a deterministic error, never a wrap.
+    let cfg = RedactConfig {
+        time_mode: TimeMode::Shift(i64::MAX),
+        ..RedactConfig::default()
+    };
+    let mut r = Redact::new(cfg);
+    let mut out = Vec::new();
+    let err = r
+        .apply(commit_ev("r", 1, None, Some(ident("A", "a@x", ts("100 +0000", 100, 0)))), &mut out)
+        .unwrap_err();
+    assert!(matches!(err, Error::TimestampOutOfRange { .. }), "{err:?}");
+}
+
+/// R6: `zero` collapses the time axis; `bucket` preserves coarse order and
+/// collapses ties within a bucket (day/week/month, UTC).
+#[test]
+fn r6_zero_and_bucket_ordering() {
+    let cfg = RedactConfig {
+        time_mode: TimeMode::Zero,
+        ..RedactConfig::default()
+    };
+    let (out, _) = run_events(cfg, &corpus_events());
+    for ev in &out {
+        match ev {
+            Event::Commit(c) => {
+                for id in [c.author.as_ref(), c.committer.as_ref()].into_iter().flatten() {
+                    assert_eq!(id.time.epoch, 0);
+                    assert_eq!(id.time.raw, b("0 +0000"));
+                }
+            }
+            Event::Tag(tg) => {
+                assert_eq!(tg.tagger.as_ref().unwrap().time.epoch, 0);
+            }
+            _ => {}
+        }
+    }
+
+    // Bucket day: 1700000000 (2023-11-14 22:13:20 UTC) and 1700000100 fall
+    // in the same UTC day; 1700086400 is the next UTC midnight exactly.
+    let cfg = RedactConfig {
+        time_mode: TimeMode::Bucket(TimeBucketUnit::Day),
+        ..RedactConfig::default()
+    };
+    let (out, _) = run_events(cfg, &corpus_events());
+    if let Event::Commit(c) = &out[0] {
+        let t = &c.committer.as_ref().unwrap().time;
+        assert_eq!(t.epoch, 1_699_920_000); // 2023-11-14 00:00:00 UTC
+        assert_eq!(t.raw, b("1699920000 +0000"));
+    }
+
+    // Bucket week: 2023-11-14 is a Tuesday; Monday is 2023-11-13.
+    let cfg = RedactConfig {
+        time_mode: TimeMode::Bucket(TimeBucketUnit::Week),
+        ..RedactConfig::default()
+    };
+    let (out, _) = run_events(cfg, &corpus_events());
+    if let Event::Commit(c) = &out[0] {
+        assert_eq!(c.committer.as_ref().unwrap().time.epoch, 1_699_833_600);
+    }
+
+    // Bucket month: floor to 2023-11-01.
+    let cfg = RedactConfig {
+        time_mode: TimeMode::Bucket(TimeBucketUnit::Month),
+        ..RedactConfig::default()
+    };
+    let (out, _) = run_events(cfg, &corpus_events());
+    if let Event::Commit(c) = &out[0] {
+        assert_eq!(c.committer.as_ref().unwrap().time.epoch, 1_698_796_800);
+    }
+}
+
+/// R6: `fuzz` stays within the jitter window, is a pure function of
+/// (seed, role, raw), and honors the seed.
+#[test]
+fn r6_fuzz_bounds_and_seed_sensitivity() {
+    let cfg = RedactConfig {
+        time_mode: TimeMode::Fuzz { jitter_secs: 3600 },
+        seed: 0x9E37_79B9_7F4A_7C15,
+        ..RedactConfig::default()
+    };
+    let (out, _) = run_events(cfg.clone(), &corpus_events());
+    let originals = [1_700_000_000i64, 1_700_000_100, 1_700_086_400, 1_700_172_800];
+    let mut got = Vec::new();
+    for ev in &out {
+        match ev {
+            Event::Commit(c) => {
+                if let Some(cm) = &c.committer {
+                    got.push(cm.time.epoch);
+                }
+                if let Some(a) = &c.author {
+                    got.push(a.time.epoch);
+                }
+            }
+            Event::Tag(tg) => got.push(tg.tagger.as_ref().unwrap().time.epoch),
+            _ => {}
+        }
+    }
+    assert_eq!(got.len(), originals.len());
+    for (old, new) in originals.iter().zip(got.iter()) {
+        assert!((new - old).abs() <= 3600, "jitter exceeded window: {old} -> {new}");
+    }
+    // Same seed ⇒ same output; different seed ⇒ different output
+    // (overwhelmingly likely with a 7201-value window).
+    let (out2, _) = run_events(cfg, &corpus_events());
+    let mut got2 = Vec::new();
+    for ev in &out2 {
+        if let Event::Commit(c) = ev {
+            if let Some(cm) = &c.committer {
+                got2.push(cm.time.epoch);
+            }
+        }
+    }
+    // Committer-only sequences (got also holds author times): both runs
+    // used the same seed, so they must reproduce exactly.
+    let committers_of = |evs: &[Event], out: &[Event]| -> Vec<i64> {
+        let _ = evs;
+        out.iter()
+            .filter_map(|ev| match ev {
+                Event::Commit(c) => c.committer.as_ref().map(|cm| cm.time.epoch),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(got2, committers_of(&[], &out), "same seed must reproduce output");
+    let cfg2 = RedactConfig {
+        time_mode: TimeMode::Fuzz { jitter_secs: 3600 },
+        seed: 0x1234_5678_9ABC_DEF0,
+        ..RedactConfig::default()
+    };
+    let (out3, _) = run_events(cfg2, &corpus_events());
+    let mut got3 = Vec::new();
+    for ev in &out3 {
+        if let Event::Commit(c) = ev {
+            if let Some(cm) = &c.committer {
+                got3.push(cm.time.epoch);
+            }
+        }
+    }
+    assert_ne!(got2, got3, "different seed should change output");
+}
+
+/// R7: every altered `Timestamp.raw` is canonically `<epoch> ±HHMM`
+/// (negative epochs get a leading `-`); unaltered fields stay byte-exact.
+#[test]
+fn r7_canonical_raw_including_negative_epochs() {
+    let cfg = RedactConfig {
+        time_mode: TimeMode::Bucket(TimeBucketUnit::Day),
+        ..RedactConfig::default()
+    };
+    let (out, _) = run_events(cfg, &corpus_events());
+    for ev in &out {
+        match ev {
+            Event::Commit(c) => {
+                for id in [c.author.as_ref(), c.committer.as_ref()].into_iter().flatten() {
+                    assert!(is_canonical_raw(id.time.raw.as_slice()), "raw {:?}", id.time.raw);
+                }
+            }
+            Event::Tag(tg) => {
+                let id = tg.tagger.as_ref().unwrap();
+                assert!(is_canonical_raw(id.time.raw.as_slice()));
+            }
+            _ => {}
+        }
+    }
+
+    // Pre-1970 commit: negative epoch serializes with a leading '-'.
+    let mut r = Redact::new(RedactConfig {
+        time_mode: TimeMode::Shift(-86_400 * 40 * 365), // ~40 years back
+        ..RedactConfig::default()
+    });
+    let mut out = Vec::new();
+    r.apply(
+        commit_ev("r", 1, None, Some(ident("A", "a@x", ts("1000000000 +0200", 1_000_000_000, 120)))),
+        &mut out,
+    )
+    .unwrap();
+    if let Event::Commit(c) = &out[0] {
+        let t = &c.committer.as_ref().unwrap().time;
+        assert!(t.epoch < 0);
+        assert!(t.raw.starts_with(b"-"), "raw {:?}", t.raw);
+        assert!(is_canonical_raw(t.raw.as_slice()));
+        assert_eq!(t.tz_offset_min, 0);
+    }
+}
+
+/// §4.9 (M1): the lenient corner — an unparseable `when` raw (parser
+/// zero-fills epoch/tz) keeps its bytes under `preserve`+`keep_tz` but is
+/// regenerated as `0 +0000` under any redacting mode.
+#[test]
+fn edge_lenient_unparseable_raw() {
+    let weird_time = Timestamp {
+        raw: b("yesterday maybe"),
+        epoch: 0,
+        tz_offset_min: 0,
+    };
+    // preserve + keep_tz: untouched (identity path).
+    let cfg = RedactConfig {
+        keep_tz: true,
+        ..RedactConfig::default()
+    };
+    let (out, _) = run_events(
+        cfg,
+        &[commit_ev("r", 1, None, Some(Ident { name: b("A"), email: b("a@x"), time: weird_time.clone() }))],
+    );
+    if let Event::Commit(c) = &out[0] {
+        assert_eq!(c.committer.as_ref().unwrap().time.raw, b("yesterday maybe"));
+    }
+
+    // zero: regenerated — original bytes cannot smuggle through.
+    let cfg = RedactConfig {
+        time_mode: TimeMode::Zero,
+        ..RedactConfig::default()
+    };
+    let (out, _) = run_events(
+        cfg,
+        &[commit_ev("r", 1, None, Some(Ident { name: b("A"), email: b("a@x"), time: weird_time }))],
+    );
+    if let Event::Commit(c) = &out[0] {
+        assert_eq!(c.committer.as_ref().unwrap().time.raw, b("0 +0000"));
+    }
+}
+
+/// Pseudonym ordinals are per distinct (name, email) regardless of role and
+/// assigned in first-seen stream order.
+#[test]
+fn m1_pseudonym_ordinals_are_first_seen_and_role_agnostic() {
+    let cfg = RedactConfig {
+        ident_mode: IdentMode::Pseudonymize(PseudonymStyle::Ordinal),
+        keep_tz: true,
+        ..RedactConfig::default()
+    };
+    let (out, rep) = run_events(
+        cfg,
+        &[
+            commit_ev("r", 1, Some(ident("A", "a@x", ts("1 +0000", 1, 0))), None),
+            commit_ev("r", 2, None, Some(ident("A", "a@x", ts("2 +0000", 2, 0)))),
+            commit_ev("r", 3, Some(ident("B", "b@y", ts("3 +0000", 3, 0))), Some(ident("C", "c@z", ts("4 +0000", 4, 0)))),
+        ],
+    );
+    let get = |ev: &Event, which| match ev {
+        Event::Commit(c) => {
+            let id = if which == 0 { c.author.as_ref().unwrap() } else { c.committer.as_ref().unwrap() };
+            (id.name.clone(), id.email.clone())
+        }
+        _ => panic!(),
+    };
+    // A is User 1 for both author and committer (role-agnostic).
+    assert_eq!(get(&out[0], 0), (b("User 1"), b("user1@example.invalid")));
+    assert_eq!(get(&out[1], 1), (b("User 1"), b("user1@example.invalid")));
+    assert_eq!(get(&out[2], 0), (b("User 2"), b("user2@example.invalid")));
+    assert_eq!(get(&out[2], 1), (b("User 3"), b("user3@example.invalid")));
+    assert_eq!(rep.totals.idents_redacted, 3);
+}
+
+/// `Hash` pseudonyms are stable across runs and injective over a corpus;
+/// distinct originals never collide (built-in modes are injective by
+/// construction — R3).
+#[test]
+fn m1_pseudonym_hash_stable_and_injective() {
+    let cfg = RedactConfig {
+        ident_mode: IdentMode::Pseudonymize(PseudonymStyle::Hash),
+        keep_tz: true,
+        ..RedactConfig::default()
+    };
+    let (out1, rep1) = run_events(cfg.clone(), &corpus_events());
+    let (out2, rep2) = run_events(cfg.clone(), &corpus_events());
+    assert_eq!(rep1, rep2, "hash pseudonyms must be deterministic");
+    let mut emails = Vec::new();
+    for ev in &out1 {
+        if let Event::Commit(c) = ev {
+            if let Some(cm) = &c.committer {
+                emails.push(cm.email.clone());
+            }
+            if let Some(a) = &c.author {
+                emails.push(a.email.clone());
+            }
+        }
+    }
+    let mut sorted = emails.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(emails.len(), sorted.len(), "hash pseudonyms must not collide");
+    // Same ident hash-maps to the same pseudonym in author/committer slots.
+    let events = vec![commit_ev(
+        "r",
+        1,
+        Some(ident("A", "a@x", ts("1 +0000", 1, 0))),
+        Some(ident("A", "a@x", ts("2 +0000", 2, 0))),
+    )];
+    let (out, _) = run_events(cfg, &events);
+    if let Event::Commit(c) = &out[0] {
+        assert_eq!(c.author.as_ref().unwrap().email, c.committer.as_ref().unwrap().email);
+    }
 }

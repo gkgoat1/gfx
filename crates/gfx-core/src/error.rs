@@ -49,6 +49,10 @@ pub enum Error {
     TrailingBytes { len: usize },
     /// Strict mode rejects this (known-unknown) `feature`.
     UnsupportedFeature { name: String },
+    /// A pass needed a timestamp outside the representable range (`i64`
+    /// epoch seconds). Input-derived and deterministic: a silently wrong
+    /// date is worse than a failed run (plan-redact-idents.md §5.3).
+    TimestampOutOfRange { token: BString64 },
     /// A state machine invariant was violated — always a bug in gfx, never
     /// caused by input. Fuzzing proves this variant unreachable on real input.
     Internal(&'static str),
@@ -60,6 +64,12 @@ pub enum Error {
 pub struct BString64(pub(crate) alloc::vec::Vec<u8>);
 
 impl BString64 {
+    /// Public constructor for pass crates raising error variants that
+    /// carry byte context (e.g. `TimestampOutOfRange`).
+    pub fn new(bytes: alloc::vec::Vec<u8>) -> Self {
+        BString64(bytes)
+    }
+
     pub fn as_slice(&self) -> &[u8] {
         &self.0
     }
@@ -119,6 +129,10 @@ impl fmt::Display for Error {
                 write!(f, "{len} trailing bytes after end of stream")
             }
             Error::UnsupportedFeature { name } => write!(f, "unsupported feature {name:?}"),
+            Error::TimestampOutOfRange { token } => write!(
+                f,
+                "timestamp {token:?} is outside the representable range for this transform"
+            ),
             Error::Internal(ctx) => write!(f, "internal parser error: {ctx}"),
         }
     }
