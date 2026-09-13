@@ -10,11 +10,19 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 gfx-strip-blobs = { path = "../crates/gfx-strip-blobs" }
+gfx-redact = { path = "../crates/gfx-redact" }
 gfx-core = { path = "../crates/gfx-core" }
 
 [[bin]]
 name = "glob_match"
 path = "fuzz_targets/glob_match.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "redact_roundtrip"
+path = "fuzz_targets/redact_roundtrip.rs"
 test = false
 doc = false
 bench = false

@@ -2,10 +2,10 @@
 
 | Field    | Value |
 |----------|-------|
-| Status   | Approved — implementing (M0–M3) |
+| Status   | Implemented (M0–M3) |
 | Scope    | builtin pass: rewrite author/committer/tagger identities and timestamps for share-safe history |
 | Depends  | plan-fast-export.md §5 (architecture), §6 (builtin framework), §7 (`gfx-remap`); plan-pass-driver-strip-blobs.md §4 (driver, registry), §5.5 (remap interaction note) |
-| Updated  | 2025-09-05 |
+| Updated  | 2026-09-12 (implemented — see [rewrite-cli.md](rewrite-cli.md) for the user-facing surface) |
 
 ---
 

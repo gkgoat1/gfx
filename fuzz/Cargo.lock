@@ -65,8 +65,17 @@ name = "gfx-fuzz"
 version = "0.0.0"
 dependencies = [
  "gfx-core",
+ "gfx-redact",
  "gfx-strip-blobs",
  "libfuzzer-sys",
+]
+
+[[package]]
+name = "gfx-redact"
+version = "0.1.0"
+dependencies = [
+ "bstr",
+ "gfx-core",
 ]
 
 [[package]]

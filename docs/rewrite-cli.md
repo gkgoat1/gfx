@@ -101,6 +101,80 @@ exported marks after the round. In v1, remap flags rewritten commits via
 `original-oid` bookkeeping — see the implementation note in
 [plan §5.5](plan-pass-driver-strip-blobs.md).
 
+### redact
+
+Pass name `redact`; registered in the composed `gfx` binary but **not in
+the default `--passes`** — redaction is always opt-in. Rewrites
+`author`/`committer`/`tagger` identities and timestamps; never touches
+ops, topology, marks, or messages (see the checklist below for what that
+leaves behind).
+
+| Flag | Meaning |
+|---|---|
+| `--redact.map <toml>` | exact `[[row]]` mappings (`name?`, `email?` wildcards, `new_name`, `new_email`); mutually exclusive with `--redact.pseudonymize` |
+| `--redact.pseudonymize` | replace every ident with a deterministic pseudonym |
+| `--redact.pseudonym-style ordinal\|hash` | `ordinal` (default): `User 1 <user1@example.invalid>`, derives nothing from input bytes, does not correlate across repos. `hash`: stable across repos but brute-forceable — convenience, not safety |
+| `--redact.time-mode preserve\|zero\|shift\|bucket\|fuzz` | `preserve` (default) keeps epochs; `zero` collapses the time axis; `shift <secs>` preserves order/intervals; `bucket day\|week\|month` floors in UTC; `fuzz` jitters within a window (order *not* monotone) |
+| `--redact.time-shift <secs>` | shift amount, e.g. `365d`, `2w`, or plain seconds |
+| `--redact.time-bucket day\|week\|month` | bucket boundary (UTC) |
+| `--redact.time-jitter <secs>` | fuzz window |
+| `--redact.seed <n>` | fuzz seed (required for fuzz; invalid otherwise) |
+| `--redact.keep-tz` | keep timezone offsets — they are **zeroed by default** in every mode (offsets are geographic metadata) |
+
+Semantics (decision D1, doc-scoped): the pass **rewrites fields in place
+and never restructures anything**. A commit whose idents and times the
+policy leaves unchanged keeps its hash (a pinning table + `keep-tz` is a
+byte-identity round).
+
+- Time modes have documented consequences: `shift` preserves order and
+  intervals (the interval fingerprint survives — by design, by choice);
+  `zero` destroys the axis; `bucket` keeps coarse order; `fuzz` is
+  deterministic obfuscation with a retained seed, not cryptography.
+- Unparseable `when` fields keep their bytes only under
+  `preserve` + `keep-tz`; every redacting mode regenerates them.
+- Distinct idents mapped to one replacement (merge rows) are reported as
+  `collision` entries — visible, never silent.
+- Giving `--redact.*` flags without `redact` in `--passes` is a usage
+  error: redaction is never silently skipped.
+
+The `--redact.map` file:
+
+```toml
+[[row]]
+name = "Alice"                # omit for a wildcard
+email = "alice@example.com"   # omit for a wildcard
+new_name = "Bot 1"
+new_email = "bot1@ci.invalid"
+```
+
+TOML is UTF-8, so rows cannot express non-UTF-8 ident bytes; host code
+injects an `IdentPolicy` for that.
+
+## Pre-sharing checklist
+
+Redacting idents and times does not make a repo anonymous. Before
+sharing outside your organization, work through:
+
+1. **Idents and times** — `--passes redact,remap` with
+   `--redact.pseudonymize --redact.time-mode zero` is the strong default;
+   `preserve` (with its default tz zeroing) is the internal-hand-off
+   choice.
+2. **Commit and tag messages** — `Signed-off-by:`, `Co-authored-by:`,
+   quoted emails, and prose self-identification are **not** rewritten in
+   v1 (message rewriting is a separate future pass). `git log --format=%B
+   | grep -iE 'signed-off-by|@'` to see what would leak.
+3. **Ref names** — `refs/heads/alice/fix-thing` leaks identity; rename or
+   drop such refs first (v1 has no ref renaming).
+4. **Paths** — `src/alice/…` leaks identity; path rewriting is out of
+   scope for redact (a future anonymize pass covers it).
+5. **The mapping artifact** — `<gitdir>/gfx/redact-map.txt`
+   re-identifies the anonymized repo. It is the join key for any future
+   message-rewrite pass; keep it out of the repository and out of shared
+   backups.
+6. **GPG signatures** — the driver strips signed tags
+   (`--signed-tags=strip`); commits carrying signatures will fail
+   verification after any rewrite.
+
 ## Config file
 
 ```toml
@@ -110,6 +184,10 @@ larger-than = "1M"
 path-glob = ["**/Cargo.lock", "*.min.js"]
 content-signals = true
 
+[redact]
+pseudonymize = true
+time-mode = "zero"
+
 [remap]
 track-message-oids = false
 ```
@@ -118,6 +196,12 @@ track-message-oids = false
 file values; unknown passes or flags in the file are usage errors.
 
 ## Artifacts
+
+- `commit-map` / `ref-map` / `run-report.txt` — driver artifacts.
+- `strip-report.txt` — per-path stripping decisions (when the strip-blobs
+  pass ran).
+- `redact-map.txt` — **SENSITIVE**: the ident/time mapping produced by
+  the redact pass. It re-identifies the anonymized repo; keep it local.
 
 After a successful round, `<gitdir>/gfx/` contains:
 
@@ -148,6 +232,16 @@ Each pass crate also ships an example helper binary built exactly this
 way (`examples/strip-blobs.rs`, `examples/remap.rs`).
 
 ## Known v1 limitations
+
+- Buffered rounds: the export stream and event list live in memory.
+- Empty branches (refs with no commits) are dropped by the round-trip.
+- No `--prune-empty`, no `--replace-refs`, no partial-history
+  (`--refs`) rewriting, no message-hash rewriting yet — see the plan's
+  Deferred section.
+- Redact does not rewrite messages, ref names, or paths — see the
+  pre-sharing checklist above.
+- `--redact.map` rows cannot express non-UTF-8 ident bytes (TOML
+  limitation); use an injected `IdentPolicy` from host code.
 
 - Buffered rounds: the export stream and event list live in memory.
 - Empty branches (refs with no commits) are dropped by the round-trip.
