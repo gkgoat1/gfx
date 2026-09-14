@@ -16,6 +16,21 @@
 //! fail — or whose outputs all equal their inputs — the output is
 //! byte-identical input (G3 no-op elision).
 //!
+//! **Path rules** (plan-blob-xform-paths.md): standalone `blob` events
+//! carry no path, so per-extension transforms (`.rs` → rustfmt) cannot run
+//! at the blob event — a blob's paths bind late and non-uniquely (the same
+//! mark can appear as `a.rs` in one commit and `d.txt` in another). Path
+//! rules therefore act at `M` op sites, where path and mode are both
+//! known: originals are cached from blob events, the first *matching* use
+//! runs the rule's chain on the cached bytes, emits the result as a
+//! **synthetic blob event** immediately before that commit under a
+//! driver-allocated mark (D3), and rewrites the op to reference it. Later
+//! matching uses reuse the cached synthetic mark — the transform runs at
+//! most once per (blob, rule). Non-matching uses keep the original bytes;
+//! the original blob event always passes through (D2). Mode is known at
+//! the op site, so special modes are skipped by default (D6) — the
+//! whole-blob mode-blindness hazard does not apply to path rules.
+//!
 //! Machinery lives here; transforms are injected behind
 //! [`SharedBlobTransform`] (`Arc + Send + Sync`, the strip-blobs
 //! `SharedMatcher` shape upgraded for the multistream `--jobs` fan-out),
@@ -27,6 +42,7 @@ extern crate alloc;
 
 pub mod builtins;
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -103,6 +119,23 @@ where
 // ---------------------------------------------------------------------------
 // Config + report
 
+/// One path rule (plan-blob-xform-paths.md §5.1): extension → transform
+/// chain. Path rules act at `M` op sites, not blob events (D2).
+#[derive(Clone, Debug)]
+pub struct PathRule {
+    /// Extension bytes without the dot (`b"rs"`). Matched against the
+    /// final path component's bytes after the last `.` — case-sensitive,
+    /// byte-exact (D5); a path with no `.`, or ending in `.`, matches
+    /// nothing.
+    pub extension: Vec<u8>,
+    /// Chain, in order; same handles and semantics as the whole-blob stage.
+    pub transforms: Vec<SharedBlobTransform>,
+    /// Per-rule input selector (same D4 semantics as the base pass).
+    pub skip_larger_than: Option<u64>,
+    /// Per-rule output guard.
+    pub max_output_bytes: Option<u64>,
+}
+
 /// Configuration (plan §4.1). `Clone` shares the injected transform
 /// handles (immutable shared state); `reset()` clears counters only.
 /// `Default` is the documented profile: no transforms, no size guards,
@@ -124,6 +157,14 @@ pub struct BlobXformConfig {
     /// (default false, D5). Standalone `blob` events carry no mode and are
     /// always transformed — see the plan's mode-blindness hazard note.
     pub include_special_modes: bool,
+    /// Path rules (plan-blob-xform-paths.md). Empty ⇒ the pass behaves
+    /// exactly as the base plan describes.
+    pub path_rules: Vec<PathRule>,
+    /// Synthetic mark base: stream max mark + 1 (D3). The driver computes
+    /// it over the already-parsed stream and injects it here; **required**
+    /// when `path_rules` is non-empty — the pass refuses to run without it
+    /// (config error surfaced at `finish`), never guesses a base.
+    pub mark_base: Option<u64>,
 }
 
 impl Default for BlobXformConfig {
@@ -134,14 +175,39 @@ impl Default for BlobXformConfig {
             max_output_bytes: None,
             include_inline: true,
             include_special_modes: false,
+            path_rules: Vec::new(),
+            mark_base: None,
         }
     }
 }
 
 impl BlobXformConfig {
     pub fn is_empty(&self) -> bool {
-        self.transforms.is_empty()
+        self.transforms.is_empty() && self.path_rules.is_empty()
     }
+}
+
+/// Per-rule counters (plan-blob-xform-paths.md D9). `ops_examined` is the
+/// number of `M`-op payloads a rule judged; it partitions exactly:
+/// examined = rewritten + retained_failed + retained_guard.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PathRuleReport {
+    /// Matching `M` ops judged (mark-sourced and inline). Partitions
+    /// exactly: examined = rewritten + unchanged + failed + guard.
+    pub ops_examined: u64,
+    /// Ops rewritten to a synthetic mark (or inline-rewritten).
+    pub ops_rewritten: u64,
+    /// Chain succeeded with output identical to input: op keeps the
+    /// original mark (G3).
+    pub unchanged: u64,
+    /// Synthetic blob events created (G2: `created <= ops_rewritten`).
+    pub blobs_created: u64,
+    /// Chain failure on a matching op: original mark/payload kept (D1).
+    pub retained_failed: u64,
+    /// Guarded out (size guards, special modes): original kept.
+    pub retained_guard: u64,
+    pub bytes_in: u64,
+    pub bytes_out: u64,
 }
 
 /// Counters (plan §4.4 report surface). Totals are exact.
@@ -163,6 +229,8 @@ pub struct BlobXformReport {
     pub retained_guard: u64,
     pub bytes_in: u64,
     pub bytes_out: u64,
+    /// Per-rule counters, parallel to `config.path_rules`.
+    pub rules: Vec<PathRuleReport>,
 }
 
 impl BlobXformReport {
@@ -180,6 +248,29 @@ impl BlobXformReport {
             self.bytes_out
         )
     }
+
+    /// Full detail: whole-blob line plus one segment per path rule (D9).
+    pub fn detail_with_rules(&self, rules: &[PathRule]) -> String {
+        let mut d = self.detail();
+        for (i, r) in self.rules.iter().enumerate() {
+            let ext = rules
+                .get(i)
+                .map(|rule| String::from_utf8_lossy(&rule.extension).into_owned())
+                .unwrap_or_default();
+            d.push_str(&alloc::format!(
+                " | rule[{ext}]: ops={} rewritten={} created={} retained={} (failed={} guard={}) bytes={}->{}",
+                r.ops_examined,
+                r.ops_rewritten,
+                r.blobs_created,
+                r.retained_failed + r.retained_guard,
+                r.retained_failed,
+                r.retained_guard,
+                r.bytes_in,
+                r.bytes_out,
+            ));
+        }
+        d
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -193,18 +284,48 @@ enum Outcome {
     RetainGuard,
 }
 
-/// The `blob-xform` transform. Stateless per blob by design (plan §4.1):
-/// there is no cross-event state beyond counters, which is what makes
-/// per-blob failure isolation trivial.
+/// Cached per-(blob, rule) judgment (G2 create-once; D4).
+#[derive(Clone, Copy)]
+enum Cached {
+    Synthetic(u64),
+    Unchanged,
+    Failed,
+    Guarded,
+}
+
+/// The `blob-xform` transform. The whole-blob stage is stateless per blob
+/// by design (plan §4.1); path rules add three pieces of cross-event
+/// state (plan-blob-xform-paths.md D4): the original-bytes cache (a
+/// blob's last matching use is unknowable in streaming, R1), the
+/// create-once transformed cache, and the synthetic mark allocator.
 pub struct BlobXform {
     cfg: BlobXformConfig,
     report: BlobXformReport,
     finished: bool,
+    /// mark → post-whole-blob bytes, every blob seen (D4). Only
+    /// populated when path rules exist.
+    originals: BTreeMap<u64, Vec<u8>>,
+    /// (original mark, rule index) → cached judgment (create-once, G2:
+    /// the chain runs at most once per (blob, rule) — retention and
+    /// unchanged verdicts are cached too, since chains are pure).
+    transformed: BTreeMap<(u64, usize), Cached>,
+    /// Next synthetic mark, seeded from `cfg.mark_base` (D3).
+    next_mark: u64,
 }
 
 impl BlobXform {
     pub fn new(cfg: BlobXformConfig) -> Self {
-        BlobXform { cfg, report: BlobXformReport::default(), finished: false }
+        let next_mark = cfg.mark_base.unwrap_or(0);
+        let mut report = BlobXformReport::default();
+        report.rules = alloc::vec::from_elem(PathRuleReport::default(), cfg.path_rules.len());
+        BlobXform {
+            cfg,
+            report,
+            finished: false,
+            originals: BTreeMap::new(),
+            transformed: BTreeMap::new(),
+            next_mark,
+        }
     }
 
     pub fn report(&self) -> &BlobXformReport {
@@ -272,6 +393,146 @@ impl BlobXform {
         let outcome = self.judge(blob, guarded);
         self.settle(blob, outcome)
     }
+
+    /// Judge one payload against a path rule's own guards + chain (D5's
+    /// per-rule guards mirror the base D4 semantics).
+    fn judge_rule(&self, rule: &PathRule, blob: &[u8], guarded: bool) -> Outcome {
+        if guarded {
+            return Outcome::RetainGuard;
+        }
+        if let Some(cap) = rule.skip_larger_than {
+            if blob.len() as u64 > cap {
+                return Outcome::RetainGuard;
+            }
+        }
+        let mut current: Vec<u8> = blob.to_vec();
+        for t in &rule.transforms {
+            match t.0.apply(&current) {
+                Ok(next) => current = next,
+                Err(()) => return Outcome::RetainFailed,
+            }
+        }
+        if let Some(cap) = rule.max_output_bytes {
+            if current.len() as u64 > cap {
+                return Outcome::RetainGuard;
+            }
+        }
+        if current == blob {
+            Outcome::Unchanged
+        } else {
+            Outcome::Alter(current)
+        }
+    }
+
+
+    /// The final path component's extension bytes after the last `.`
+    /// (D5). `None` when the component has no `.`, ends with one, or
+    /// *starts* with one — `.rs` is a dotfile named `.rs`, not a file
+    /// with extension `rs` (shell/gitignore convention).
+    fn extension_of(path: &[u8]) -> Option<&[u8]> {
+        let component = match path.iter().rposition(|&b| b == b'/') {
+            Some(slash) => &path[slash + 1..],
+            None => path,
+        };
+        let dot = component.iter().rposition(|&b| b == b'.')?;
+        let ext = &component[dot + 1..];
+        if dot == 0 || ext.is_empty() {
+            None
+        } else {
+            Some(ext)
+        }
+    }
+
+    /// First path rule matching this op's path (D5: one extension ⇒ at
+    /// most one match in v1).
+    fn matching_rule(&self, path: &[u8]) -> Option<usize> {
+        let ext = Self::extension_of(path)?;
+        self.cfg
+            .path_rules
+            .iter()
+            .position(|r| r.extension.as_slice() == ext)
+    }
+
+    /// Create-once (G2): probe the judgment cache; on miss, run the rule
+    /// chain on the cached original bytes, allocate a synthetic mark, and
+    /// emit the blob event immediately before the referencing commit.
+    /// Returns the mark the op should reference — the original mark on
+    /// any retention or unchanged verdict (D1/D2).
+    fn materialize(&mut self, out: &mut Vec<Event>, rule_ix: usize, original_mark: u64) -> u64 {
+        if let Some(&cached) = self.transformed.get(&(original_mark, rule_ix)) {
+            let r = &mut self.report.rules[rule_ix];
+            r.ops_examined += 1;
+            return match cached {
+                Cached::Synthetic(m) => {
+                    r.ops_rewritten += 1;
+                    m
+                }
+                Cached::Unchanged => {
+                    r.unchanged += 1;
+                    original_mark
+                }
+                Cached::Failed => {
+                    r.retained_failed += 1;
+                    original_mark
+                }
+                Cached::Guarded => {
+                    r.retained_guard += 1;
+                    original_mark
+                }
+            };
+        }
+        let Some(original) = self.originals.get(&original_mark).cloned() else {
+            // A mark with no cached original cannot occur in a
+            // well-formed fast-export stream (blobs precede use); keep
+            // the pass total over adversarial input: retain + count.
+            let r = &mut self.report.rules[rule_ix];
+            r.ops_examined += 1;
+            r.retained_failed += 1;
+            return original_mark;
+        };
+        let outcome = self.judge_rule(&self.cfg.path_rules[rule_ix], &original, false);
+        let verdict = match &outcome {
+            Outcome::Alter(_) => None, // filled in below
+            Outcome::Unchanged => Some(Cached::Unchanged),
+            Outcome::RetainFailed => Some(Cached::Failed),
+            Outcome::RetainGuard => Some(Cached::Guarded),
+        };
+        let r = &mut self.report.rules[rule_ix];
+        r.ops_examined += 1;
+        r.bytes_in += original.len() as u64;
+        match outcome {
+            Outcome::Alter(new) => {
+                let new_len = new.len() as u64;
+                let synthetic = self.next_mark;
+                self.next_mark += 1;
+                out.push(Event::Blob {
+                    mark: Some(synthetic),
+                    original_oid: None,
+                    data: gfx_core::Data(new),
+                });
+                self.transformed.insert((original_mark, rule_ix), Cached::Synthetic(synthetic));
+                let r = &mut self.report.rules[rule_ix];
+                r.bytes_out += new_len;
+                r.ops_rewritten += 1;
+                r.blobs_created += 1;
+                synthetic
+            }
+            _ => {
+                self.transformed.insert(
+                    (original_mark, rule_ix),
+                    verdict.expect("non-alter outcomes carry a verdict"),
+                );
+                let r = &mut self.report.rules[rule_ix];
+                r.bytes_out += original.len() as u64;
+                match verdict {
+                    Some(Cached::Unchanged) => r.unchanged += 1,
+                    Some(Cached::Failed) => r.retained_failed += 1,
+                    _ => r.retained_guard += 1,
+                }
+                original_mark
+            }
+        }
+    }
 }
 
 impl gfx_core::Transform for BlobXform {
@@ -290,6 +551,14 @@ impl gfx_core::Transform for BlobXform {
                 // (documented mode-blindness hazard). D6: original_oid
                 // preserved verbatim.
                 let bytes = self.xform_payload(data.as_slice(), false);
+                if !self.cfg.path_rules.is_empty() {
+                    if let Some(m) = mark {
+                        // D4/D8: cache the post-whole-blob bytes for
+                        // later M-op sites (R1: the last matching use is
+                        // unknowable in streaming).
+                        self.originals.insert(m, bytes.clone());
+                    }
+                }
                 out.push(Event::Blob {
                     mark,
                     original_oid,
@@ -320,6 +589,71 @@ impl gfx_core::Transform for BlobXform {
                         }
                     }
                 }
+                // Path rules (plan-blob-xform-paths.md): M ops whose path
+                // matches a rule are rewritten to a synthetic blob
+                // created once per (blob, rule) and emitted immediately
+                // before this commit. Mode-aware by default (D6). Runs
+                // AFTER the whole-blob inline stage above (D8): rule
+                // chains judge post-whole-blob payloads, matching what
+                // mark-sourced ops see (the originals cache holds
+                // post-whole-blob blob bytes).
+                if !self.cfg.path_rules.is_empty() {
+                    let ops = core::mem::take(&mut c.ops);
+                    let mut rewritten = Vec::with_capacity(ops.len());
+                    for mut op in ops {
+                        if let FileOp::Modify { mode, path, source } = &mut op {
+                            let mode_guarded = !self.cfg.include_special_modes
+                                && matches!(mode, Mode::Symlink | Mode::Gitlink);
+                            if let Some(rule_ix) = self.matching_rule(path) {
+                                match source {
+                                    FileSource::DataRef(gfx_core::DataRef::Mark(m)) => {
+                                        if mode_guarded {
+                                            let r = &mut self.report.rules[rule_ix];
+                                            r.ops_examined += 1;
+                                            r.retained_guard += 1;
+                                        } else {
+                                            let orig = *m;
+                                            let new = self.materialize(out, rule_ix, orig);
+                                            *m = new;
+                                        }
+                                    }
+                                    FileSource::Inline(data) if self.cfg.include_inline => {
+                                        let outcome = self.judge_rule(
+                                            &self.cfg.path_rules[rule_ix],
+                                            data.as_slice(),
+                                            mode_guarded,
+                                        );
+                                        let r = &mut self.report.rules[rule_ix];
+                                        r.ops_examined += 1;
+                                        r.bytes_in += data.as_slice().len() as u64;
+                                        match outcome {
+                                            Outcome::Alter(new) => {
+                                                r.bytes_out += new.len() as u64;
+                                                r.ops_rewritten += 1;
+                                                *data = gfx_core::Data(new);
+                                            }
+                                            Outcome::Unchanged => {
+                                                r.bytes_out += data.as_slice().len() as u64;
+                                                r.unchanged += 1;
+                                            }
+                                            Outcome::RetainFailed => {
+                                                r.bytes_out += data.as_slice().len() as u64;
+                                                r.retained_failed += 1;
+                                            }
+                                            Outcome::RetainGuard => {
+                                                r.bytes_out += data.as_slice().len() as u64;
+                                                r.retained_guard += 1;
+                                            }
+                                        }
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+                        rewritten.push(op);
+                    }
+                    c.ops = rewritten;
+                }
                 out.push(Event::Commit(c));
             }
             other => out.push(other),
@@ -328,12 +662,25 @@ impl gfx_core::Transform for BlobXform {
     }
 
     fn finish(&mut self, _out: &mut Vec<Event>) -> Result<(), Error> {
+        // D3: synthetic marks live above the stream max; the base must be
+        // injected by the driver — never guessed (R3: a colliding mark
+        // fails the import mid-stream).
+        if !self.cfg.path_rules.is_empty() && self.cfg.mark_base.is_none() {
+            return Err(Error::Internal(
+                "blob-xform path rules require an injected mark_base (stream max mark + 1)",
+            ));
+        }
         self.finished = true;
         Ok(())
     }
 
     fn reset(&mut self) {
         self.report = BlobXformReport::default();
+        self.report.rules =
+            alloc::vec::from_elem(PathRuleReport::default(), self.cfg.path_rules.len());
         self.finished = false;
+        self.originals.clear();
+        self.transformed.clear();
+        self.next_mark = self.cfg.mark_base.unwrap_or(0);
     }
 }

@@ -504,3 +504,419 @@ fn text_transform_adapter_decodes_and_fails_clean() {
     };
     assert!(reject.apply(b"fine utf-8").is_err());
 }
+
+// ---------------------------------------------------------------------------
+// Path rules (plan-blob-xform-paths.md): create-once, D2 originals pass
+// through, D6 mode-awareness, D1/D5 fail-open + matching, D3 mark_base.
+
+use gfx_blob_xform::PathRule;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+struct Upper;
+impl BlobTransform for Upper {
+    fn name(&self) -> &'static str {
+        "upper"
+    }
+    fn apply(&self, blob: &[u8]) -> Result<Vec<u8>, ()> {
+        Ok(blob.iter().map(u8::to_ascii_uppercase).collect())
+    }
+}
+
+/// Counting transform: proves create-once (G2) at the execution level.
+struct CountingUpper(Arc<AtomicU64>);
+impl BlobTransform for CountingUpper {
+    fn name(&self) -> &'static str {
+        "counting-upper"
+    }
+    fn apply(&self, blob: &[u8]) -> Result<Vec<u8>, ()> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Ok(blob.iter().map(u8::to_ascii_uppercase).collect())
+    }
+}
+
+struct FailOnKeep;
+impl BlobTransform for FailOnKeep {
+    fn name(&self) -> &'static str {
+        "fail-on-keep"
+    }
+    fn apply(&self, blob: &[u8]) -> Result<Vec<u8>, ()> {
+        if blob.windows(6).any(|w| w == b"KEEPME") {
+            Err(())
+        } else {
+            Ok(blob.iter().map(u8::to_ascii_uppercase).collect())
+        }
+    }
+}
+
+fn rule_rs<T: BlobTransform + 'static>(t: T) -> PathRule {
+    PathRule {
+        extension: b"rs".to_vec(),
+        transforms: vec![shared(t)],
+        skip_larger_than: None,
+        max_output_bytes: None,
+    }
+}
+
+fn rules_cfg(rules: Vec<PathRule>, mark_base: u64) -> BlobXformConfig {
+    BlobXformConfig { path_rules: rules, mark_base: Some(mark_base), ..Default::default() }
+}
+
+fn mark_op(mode: Mode, path: &str, mark: Mark) -> FileOp {
+    FileOp::Modify {
+        mode,
+        path: b(path),
+        source: FileSource::DataRef(DataRef::Mark(mark)),
+    }
+}
+
+fn op_mark<'a>(ev: &'a Event, op: usize) -> Mark {
+    match ev {
+        Event::Commit(c) => match &c.ops[op] {
+            FileOp::Modify { source: FileSource::DataRef(DataRef::Mark(m)), .. } => *m,
+            other => panic!("expected mark-sourced modify, got {other:?}"),
+        },
+        other => panic!("expected commit, got {other:?}"),
+    }
+}
+
+fn drive(cfg: BlobXformConfig, stream: Vec<Event>) -> (Vec<Event>, gfx_blob_xform::BlobXformReport) {
+    let mut x = BlobXform::new(cfg);
+    let mut out = Vec::new();
+    for ev in stream {
+        x.apply(ev, &mut out).unwrap();
+    }
+    x.finish(&mut out).unwrap();
+    (out, x.report().clone())
+}
+
+#[test]
+fn first_use_creates_synthetic_blob_immediately_before_commit() {
+    // Stream max mark is 3 → base 4.
+    let stream = vec![
+        blob_ev(1, b"fn main() {}", None),
+        commit_ev("refs/heads/main", 2, vec![mark_op(Mode::Regular, "src/a.rs", 1)]),
+        commit_ev("refs/heads/main", 3, vec![mark_op(Mode::Regular, "src/b.rs", 1)]),
+    ];
+    let (out, report) = drive(rules_cfg(vec![rule_rs(CountingUpper(Arc::new(AtomicU64::new(0))))], 4), stream);
+
+    // blob(1) passes through (D2); synthetic blob(4) inserted immediately
+    // before commit 2; commit 3 reuses the mark without a new blob event.
+    assert!(matches!(&out[0], Event::Blob { mark: Some(1), data, .. } if data.as_slice() == b"fn main() {}"));
+    assert!(matches!(&out[1], Event::Blob { mark: Some(4), data, original_oid: None } if data.as_slice() == b"FN MAIN() {}"));
+    assert!(matches!(&out[2], Event::Commit(c) if c.mark == Some(2)));
+    assert!(matches!(&out[3], Event::Commit(c) if c.mark == Some(3)));
+    assert_eq!(out.len(), 4, "no second synthetic blob");
+    assert_eq!(op_mark(&out[2], 0), 4);
+    assert_eq!(op_mark(&out[3], 0), 4, "second matching use reuses the synthetic mark");
+    let r = &report.rules[0];
+    assert_eq!(r.ops_examined, 2);
+    assert_eq!(r.ops_rewritten, 2);
+    assert_eq!(r.blobs_created, 1);
+}
+
+#[test]
+fn transform_executes_at_most_once_per_blob_and_rule() {
+    let calls = Arc::new(AtomicU64::new(0));
+    let stream = vec![
+        blob_ev(1, b"fn a() {}", None),
+        commit_ev(
+            "refs/heads/main",
+            2,
+            vec![
+                mark_op(Mode::Regular, "a.rs", 1),
+                mark_op(Mode::Regular, "b.rs", 1),
+                mark_op(Mode::Regular, "c.rs", 1),
+            ],
+        ),
+    ];
+    let (out, _) = drive(
+        rules_cfg(vec![rule_rs(CountingUpper(calls.clone()))], 3),
+        stream,
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "G2: create-once");
+    // out = [orig blob(1), synthetic blob(3), commit(2)]
+    assert_eq!(op_mark(&out[2], 0), 3);
+    assert_eq!(op_mark(&out[2], 1), 3);
+    assert_eq!(op_mark(&out[2], 2), 3);
+}
+
+#[test]
+fn same_blob_matching_and_nonmatching_paths_both_work() {
+    let stream = vec![
+        blob_ev(1, b"data", None),
+        commit_ev(
+            "refs/heads/main",
+            2,
+            vec![mark_op(Mode::Regular, "a.rs", 1), mark_op(Mode::Regular, "d.txt", 1)],
+        ),
+    ];
+    let (out, report) = drive(rules_cfg(vec![rule_rs(Upper)], 3), stream);
+    assert!(matches!(&out[0], Event::Blob { mark: Some(1), data, .. } if data.as_slice() == b"data"),
+        "D2: original blob passes through unaltered");
+    assert!(matches!(&out[1], Event::Blob { mark: Some(3), data, .. } if data.as_slice() == b"DATA"));
+    assert_eq!(op_mark(&out[2], 0), 3, ".rs op rewritten");
+    assert_eq!(op_mark(&out[2], 1), 1, ".txt op keeps the original mark");
+    assert_eq!(report.rules[0].ops_examined, 1, "only the matching op is judged");
+}
+
+#[test]
+fn same_blob_two_extensions_get_two_synthetics() {
+    let stream = vec![
+        blob_ev(1, b"ab", None),
+        commit_ev(
+            "refs/heads/main",
+            2,
+            vec![mark_op(Mode::Regular, "x.rs", 1), mark_op(Mode::Regular, "y.py", 1)],
+        ),
+    ];
+    let cfg = rules_cfg(
+        vec![
+            rule_rs(Upper),
+            PathRule {
+                extension: b"py".to_vec(),
+                transforms: vec![shared(builtins::EnsureFinalNewline)],
+                skip_larger_than: None,
+                max_output_bytes: None,
+            },
+        ],
+        3,
+    );
+    let (out, report) = drive(cfg, stream);
+    assert!(matches!(&out[1], Event::Blob { mark: Some(3), data, .. } if data.as_slice() == b"AB"));
+    assert!(matches!(&out[2], Event::Blob { mark: Some(4), data, .. } if data.as_slice() == b"ab\n"));
+    assert_eq!(op_mark(&out[3], 0), 3);
+    assert_eq!(op_mark(&out[3], 1), 4);
+    assert_eq!(report.rules[0].blobs_created, 1);
+    assert_eq!(report.rules[1].blobs_created, 1);
+}
+
+#[test]
+fn failure_keeps_original_mark_and_is_counted() {
+    let stream = vec![
+        blob_ev(1, b"KEEPME secret", None),
+        blob_ev(2, b"ok", None),
+        commit_ev(
+            "refs/heads/main",
+            3,
+            vec![mark_op(Mode::Regular, "a.rs", 1), mark_op(Mode::Regular, "b.rs", 2)],
+        ),
+        commit_ev("refs/heads/main", 4, vec![mark_op(Mode::Regular, "again.rs", 1)]),
+    ];
+    let (out, report) = drive(rules_cfg(vec![rule_rs(FailOnKeep)], 5), stream);
+    assert_eq!(op_mark(&out[3], 0), 1, "D1: failed blob keeps original mark");
+    assert_eq!(op_mark(&out[3], 1), 5);
+    assert_eq!(op_mark(&out[4], 0), 1, "retention verdict is cached (no re-execution)");
+    let r = &report.rules[0];
+    assert_eq!((r.ops_examined, r.ops_rewritten, r.retained_failed), (3, 1, 2));
+}
+
+#[test]
+fn unchanged_chain_output_keeps_original_mark() {
+    // Upper is a no-op on already-uppercase content.
+    let stream = vec![
+        blob_ev(1, b"ALREADY", None),
+        commit_ev("refs/heads/main", 2, vec![mark_op(Mode::Regular, "a.rs", 1)]),
+    ];
+    let (out, report) = drive(rules_cfg(vec![rule_rs(Upper)], 3), stream);
+    assert_eq!(out.len(), 2, "no synthetic blob for an unchanged verdict");
+    assert_eq!(op_mark(&out[1], 0), 1);
+    assert_eq!(report.rules[0].unchanged, 1);
+    assert_eq!(report.rules[0].blobs_created, 0);
+}
+
+#[test]
+fn special_modes_skipped_by_default_opt_in_works() {
+    let stream = vec![
+        blob_ev(1, b"/target/x", None),
+        commit_ev(
+            "refs/heads/main",
+            2,
+            vec![
+                mark_op(Mode::Symlink, "link.rs", 1),
+                mark_op(Mode::Gitlink, "sub.rs", 1),
+            ],
+        ),
+    ];
+    let (out, report) = drive(rules_cfg(vec![rule_rs(Upper)], 3), stream.clone());
+    assert_eq!(op_mark(&out[1], 0), 1, "D6: symlink skipped by default");
+    assert_eq!(op_mark(&out[1], 1), 1, "D6: gitlink skipped by default");
+    assert_eq!(report.rules[0].retained_guard, 2);
+
+    let mut cfg = rules_cfg(vec![rule_rs(Upper)], 3);
+    cfg.include_special_modes = true;
+    let (out, report) = drive(cfg, stream);
+    assert_eq!(op_mark(&out[2], 0), 3);
+    assert_eq!(op_mark(&out[2], 1), 3);
+    assert_eq!(report.rules[0].ops_rewritten, 2);
+}
+
+#[test]
+fn inline_ops_rewrite_in_place_when_path_matches() {
+    let stream = vec![commit_ev(
+        "refs/heads/main",
+        1,
+        vec![
+            modify_ev(Mode::Regular, "a.rs", b"fn f() {}"),
+            modify_ev(Mode::Regular, "b.txt", b"fn f() {}"),
+            modify_ev(Mode::Symlink, "l.rs", b"/t/x"),
+        ],
+    )];
+    let (out, report) = drive(rules_cfg(vec![rule_rs(Upper)], 2), stream);
+    assert_eq!(inline_data(&out[0], 0), b"FN F() {}", "D7: matching inline rewritten in place");
+    assert_eq!(inline_data(&out[0], 1), b"fn f() {}", "non-matching inline untouched");
+    assert_eq!(inline_data(&out[0], 2), b"/t/x", "symlink inline guarded by default");
+    assert_eq!(report.rules[0].ops_rewritten, 1);
+    assert_eq!(report.rules[0].retained_guard, 1);
+    assert_eq!(report.rules[0].blobs_created, 0, "inline needs no synthetic blob");
+}
+
+#[test]
+fn extension_matching_is_final_component_after_last_dot() {
+    for (path, want) in [
+        ("a.rs", true),
+        ("dir/sub/b.rs", true),
+        ("archive.rs.bak", false),
+        ("noext", false),
+        ("trailing.", false),
+        (".rs", false), // a dotfile named ".rs" has no extension (D5)
+        (".hidden.rs", true),
+        ("UPPER.RS", false), // case-sensitive (D5)
+    ] {
+        let stream = vec![
+            blob_ev(1, b"ab", None),
+            commit_ev("refs/heads/main", 2, vec![mark_op(Mode::Regular, path, 1)]),
+        ];
+        let (out, _) = drive(rules_cfg(vec![rule_rs(Upper)], 3), stream);
+        // out = [orig blob(1), (synthetic blob(3) if matched), commit(2)]
+        let got = out.len() == 3;
+        assert_eq!(got, want, "path {path:?}");
+        assert_eq!(op_mark(out.last().unwrap(), 0), if want { 3 } else { 1 }, "path {path:?}");
+    }
+}
+
+#[test]
+fn mark_reference_without_cached_original_is_retained() {
+    // Adversarial/fuzz case: op references a mark whose blob never flowed.
+    let stream = vec![commit_ev(
+        "refs/heads/main",
+        1,
+        vec![mark_op(Mode::Regular, "a.rs", 42)],
+    )];
+    let (out, report) = drive(rules_cfg(vec![rule_rs(Upper)], 50), stream);
+    assert_eq!(op_mark(&out[0], 0), 42, "unknown mark kept");
+    assert_eq!(report.rules[0].retained_failed, 1);
+}
+
+#[test]
+fn missing_mark_base_with_path_rules_is_a_config_error() {
+    let mut cfg = rules_cfg(vec![rule_rs(Upper)], 0);
+    cfg.mark_base = None;
+    let mut x = BlobXform::new(cfg);
+    let mut out = Vec::new();
+    x.apply(commit_ev("refs/heads/main", 1, vec![]), &mut out).unwrap();
+    let err = x.finish(&mut out).unwrap_err();
+    assert!(matches!(err, gfx_core::Error::Internal(_)), "D3: refuse to guess a base");
+}
+
+#[test]
+fn rules_report_is_exact_and_partition_holds() {
+    let stream = vec![
+        blob_ev(1, b"fn a() {}", None),
+        blob_ev(2, b"KEEPME", None),
+        commit_ev(
+            "refs/heads/main",
+            3,
+            vec![
+                mark_op(Mode::Regular, "a.rs", 1),
+                mark_op(Mode::Regular, "b.rs", 2),
+                mark_op(Mode::Regular, "c.rs", 1),
+                mark_op(Mode::Regular, "d.txt", 2),
+            ],
+        ),
+    ];
+    let (_, report) = drive(rules_cfg(vec![rule_rs(FailOnKeep)], 4), stream);
+    let r = &report.rules[0];
+    assert_eq!(
+        r.ops_examined,
+        r.ops_rewritten + r.unchanged + r.retained_failed + r.retained_guard,
+        "counter partition (D9)"
+    );
+    assert_eq!(r.ops_examined, 3, "d.txt is not examined by the rs rule");
+    assert_eq!(r.ops_rewritten, 2);
+    assert_eq!(r.retained_failed, 1);
+    assert_eq!(r.blobs_created, 1);
+    assert_eq!(r.bytes_in, "fn a() {}".len() as u64 + "KEEPME".len() as u64);
+}
+
+#[test]
+fn zero_rule_alterations_is_event_identity() {
+    // Everything fails → output equals input exactly (G3 lifted to rules).
+    let stream = vec![
+        blob_ev(1, b"KEEPME a", None),
+        blob_ev(2, b"KEEPME b", None),
+        commit_ev(
+            "refs/heads/main",
+            3,
+            vec![mark_op(Mode::Regular, "a.rs", 1), mark_op(Mode::Regular, "b.rs", 2)],
+        ),
+        Event::Done,
+    ];
+    let (out, _) = drive(rules_cfg(vec![rule_rs(FailOnKeep)], 4), stream.clone());
+    assert_eq!(out, stream);
+}
+
+#[test]
+fn whole_blob_stage_feeds_path_rules_post_transform_bytes() {
+    // D8: whole-blob chain runs first; the rule sees its output.
+    let mut cfg = rules_cfg(vec![rule_rs(Upper)], 3);
+    cfg.transforms = vec![shared(builtins::CrlfToLf)];
+    let stream = vec![
+        blob_ev(1, b"a\r\nb", None),
+        commit_ev("refs/heads/main", 2, vec![mark_op(Mode::Regular, "a.rs", 1)]),
+    ];
+    let (out, _) = drive(cfg, stream);
+    assert!(matches!(&out[0], Event::Blob { data, .. } if data.as_slice() == b"a\nb"),
+        "whole-blob stage altered the original");
+    assert!(matches!(&out[1], Event::Blob { data, .. } if data.as_slice() == b"A\nB"),
+        "rule ran on post-whole-blob bytes");
+
+    // Same order for inline ops: whole-blob chain first, then the rule.
+    let mut cfg = rules_cfg(vec![rule_rs(Upper)], 3);
+    cfg.transforms = vec![shared(builtins::CrlfToLf)];
+    let stream = vec![commit_ev(
+        "refs/heads/main",
+        1,
+        vec![modify_ev(Mode::Regular, "a.rs", b"x\r\n")],
+    )];
+    let (out, _) = drive(cfg, stream);
+    assert_eq!(inline_data(&out[0], 0), b"X\n", "inline: whole-blob then rule (D8)");
+}
+
+#[test]
+fn reset_clears_rule_state_and_allocator() {
+    let mut cfg = rules_cfg(vec![rule_rs(Upper)], 3);
+    let mk = || {
+        vec![
+            blob_ev(1, b"ab", None),
+            commit_ev("refs/heads/main", 2, vec![mark_op(Mode::Regular, "a.rs", 1)]),
+        ]
+    };
+    cfg.mark_base = Some(3);
+    let mut x = BlobXform::new(cfg);
+    let mut out1 = Vec::new();
+    for ev in mk() {
+        x.apply(ev, &mut out1).unwrap();
+    }
+    x.finish(&mut out1).unwrap();
+    let r1 = x.report().clone();
+    x.reset();
+    assert_eq!(x.report().rules[0].ops_examined, 0);
+    let mut out2 = Vec::new();
+    for ev in mk() {
+        x.apply(ev, &mut out2).unwrap();
+    }
+    x.finish(&mut out2).unwrap();
+    assert_eq!(out1, out2, "reset restores fresh state, allocator included");
+    assert_eq!(*x.report(), r1);
+}

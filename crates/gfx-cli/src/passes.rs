@@ -409,6 +409,7 @@ impl PassFactory for BlobXformFactory {
             max_output_bytes: max_output,
             include_inline: true,
             include_special_modes: args.flag("blob-xform.include-special-modes"),
+            ..Default::default()
         }))
     }
 }
