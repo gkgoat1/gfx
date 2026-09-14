@@ -52,6 +52,14 @@ you):
 git -C my-repo.git reflog expire --expire=now --all && git -C my-repo.git gc --prune=now
 ```
 
+## Global flags
+
+| Flag | Meaning |
+|---|---|
+| `--save-remotes` | snapshot the repo's allowlisted remote data (remote URLs/pushurls/fetch specs, branch tracking, LFS endpoints — [plan-remote-data.md](plan-remote-data.md)) to `gfx/remote-state.bin` (exact, NUL-framed) + `gfx/remote-state.txt` (userinfo-redacted) before rewriting |
+| `--restore-remotes` | after the rewrite, re-add any remote-data keys that went missing and report drift (normally a no-op: the rewrite never touches `.git/config`); live values are never overwritten |
+| `--remote-refs <policy>` | `refs/remotes/*` after the rewrite: `rewrite` (default: they ride the stream and end up naming rewritten commits — misleading until the next fetch), `drop` (delete; the next fetch repopulates — recommended for redaction runs), `pin` (restore pre-rewrite OIDs; keeps pre-rewrite objects reachable — hostile to redaction) |
+
 ## Flags
 
 Global:
@@ -246,23 +254,29 @@ R2/R6), not corruption.
 Redacting idents and times does not make a repo anonymous. Before
 sharing outside your organization, work through:
 
-1. **Idents and times** — `--passes redact,remap` with
+1. **Remote data (packs)** — `--pack.save-remotes` archives remote URLs
+   and branch tracking; a bare clone's `remote.origin.url` is a **host
+   path**, and URLs can embed credentials (the pack fails closed on
+   those unless you override). Review the `remotes/*` members
+   (`unzip -l` / `unzip -p`) before sharing; `gfx unpack
+   --restore-remotes` is what consumes them on the far side.
+2. **Idents and times** — `--passes redact,remap` with
    `--redact.pseudonymize --redact.time-mode zero` is the strong default;
    `preserve` (with its default tz zeroing) is the internal-hand-off
    choice.
-2. **Commit and tag messages** — `Signed-off-by:`, `Co-authored-by:`,
+3. **Commit and tag messages** — `Signed-off-by:`, `Co-authored-by:`,
    quoted emails, and prose self-identification are **not** rewritten in
    v1 (message rewriting is a separate future pass). `git log --format=%B
    | grep -iE 'signed-off-by|@'` to see what would leak.
-3. **Ref names** — `refs/heads/alice/fix-thing` leaks identity; rename or
+4. **Ref names** — `refs/heads/alice/fix-thing` leaks identity; rename or
    drop such refs first (v1 has no ref renaming).
-4. **Paths** — `src/alice/…` leaks identity; path rewriting is out of
+5. **Paths** — `src/alice/…` leaks identity; path rewriting is out of
    scope for redact (a future anonymize pass covers it).
-5. **The mapping artifact** — `<gitdir>/gfx/redact-map.txt`
+6. **The mapping artifact** — `<gitdir>/gfx/redact-map.txt`
    re-identifies the anonymized repo. It is the join key for any future
    message-rewrite pass; keep it out of the repository and out of shared
    backups.
-6. **GPG signatures** — the driver strips signed tags
+7. **GPG signatures** — the driver strips signed tags
    (`--signed-tags=strip`); commits carrying signatures will fail
    verification after any rewrite.
 

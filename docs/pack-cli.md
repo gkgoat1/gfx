@@ -36,6 +36,19 @@ gfx pack \
 - `--dry-run` runs export → passes → report and writes nothing.
 - `--record-source-paths` embeds `meta/source-hints.toml`; by default the
   archive contains no host paths (D4).
+- `--save-remotes` captures each repo's allowlisted **remote data**
+  (remote URLs/pushurls/fetch specs, mirror/prune/tagOpt flags, branch
+  tracking, LFS endpoint URLs — the code-level allowlist in
+  [plan-remote-data.md](plan-remote-data.md)) into `remotes/<name>.config`
+  members, sha256-pinned in the manifest. Executable keys
+  (`credential.helper`, `uploadpack`/`receivepack`, …) never travel and
+  are counted as skipped. Two cautions:
+  - a credential-bearing URL (userinfo with a password, or any
+    `http(s)` userinfo) **fails the pack**; `--allow-credential-urls`
+    overrides — prefer `--encrypt*` since the archive then holds secrets;
+  - bare clones record their source path as `remote.origin.url`, so
+    saving remotes can expose host layout exactly like
+    `--record-source-paths`.
 
 Determinism (D4): identical inputs + flags ⇒ identical archive bytes
 (fixed entry order, DOS-epoch zip timestamps, no clocks).
@@ -54,6 +67,7 @@ sharing.)
 
 ```
 manifest.toml            # passes + flags audit, per-repo sha256/size/ref-tips
+                         #   (+ remotes-sha256 when --save-remotes)
 streams/<name>.fi        # transformed fast-export stream
 maps/<name>/commit-map   # old-oid → new-oid ('-' until unpack finalizes)
 maps/<name>/ref-map
@@ -69,3 +83,12 @@ fresh bare repos (`git init --bare`), `git fast-import` per stream,
 commit-map finalization from the import's marks, ref-tip assertions
 against the manifest (D8), and per-repo artifacts under
 `<gitdir>/gfx/`.
+
+- `--restore-remotes` applies each repo's archived remote data
+  (`remotes/<name>.config`, from `--pack.save-remotes`) to the fresh repo
+  — the member is hash-verified against the manifest and re-filtered
+  through the allowlist before a single key is written — then drops the
+  `refs/remotes/*` that rode the stream (on a fresh repo they falsely
+  name rewritten commits as what the server has; the first fetch
+  repopulates them). Repos without a member report `remotes: none
+  saved`. Off by default.

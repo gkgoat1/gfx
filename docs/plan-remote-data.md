@@ -2,9 +2,9 @@
 
 |          |                                                              |
 |----------|--------------------------------------------------------------|
-| Status   | Research complete; design ready for implementation            |
+| Status   | Implemented (M0–M4) |
 | Created  | 2026-09-14                                                   |
-| Updated  | 2026-09-14                                                   |
+| Updated  | 2026-09-14 (M0–M4; see [rewrite-cli.md](rewrite-cli.md) + [pack-cli.md](pack-cli.md)) |
 | Depends on | [plan-pass-driver.md](plan-pass-driver.md), [plan-pack-v2.md](plan-pack-v2.md), [rewrite-cli.md](rewrite-cli.md) |
 
 ## Goal
@@ -277,7 +277,7 @@ Each ends green (`cargo test --workspace`) and commits separately.
    unreachable; `pin` restores pre-rewrite OIDs (and the report warns they
    pin pre-rewrite objects); `rewrite` is today's bytes (C7); drift
    detection when config changed between save and restore.
-5. **M4 — docs & hardening.** rewrite-cli.md flag tables + a "Remote data"
+5. **M4 — docs & hardening.** (Zip-parity note: the archive format has a single zip backend — both writers are the same code, so parity is structural, not tested.) rewrite-cli.md flag tables + a "Remote data"
    section (what survives by default, what the flags do, credential
    guidance); pack docs; pre-sharing checklist gains "saved remotes may
    carry URLs — review `remotes/*` members before sharing"; zip-backend
