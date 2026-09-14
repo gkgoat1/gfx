@@ -173,6 +173,43 @@ usual (remap owns that bookkeeping).
 | `--blob-xform.ext.<EXT>.crlf-to-lf` / `.trim-trailing-whitespace` / `.ensure-final-newline` | builtin chain stages for the `*.<EXT>` rule |
 | `--blob-xform.ext.<EXT>.skip-larger-than <size>` / `.max-output-bytes <size>` | per-rule size guards |
 
+#### Formatter recipes (path rules)
+
+Format every file of one type, in every commit, with the historical
+content the formatter can handle — files it cannot parse are carried
+untouched (fail-open D1), which is usually exactly right for ancient
+syntax:
+
+```bash
+# Rust — pin the toolchain; the command IS the purity contract.
+rustup component add rustfmt --toolchain 1.85.0
+gfx --repo r.git --passes blob-xform,remap \
+    --blob-xform.ext.rs.cmd 'rustup run 1.85.0 rustfmt --edition 2021 --emit stdout'
+
+# C/C++ — --assume-filename gives clang-format a language hint for stdin.
+gfx --repo r.git --passes blob-xform,remap \
+    --blob-xform.ext.c.cmd  'clang-format --assume-filename=x.c' \
+    --blob-xform.ext.h.cmd  'clang-format --assume-filename=x.h' \
+    --blob-xform.ext.cpp.cmd 'clang-format --assume-filename=x.cpp'
+
+# Python (reads stdin when given -) / Go.
+gfx --repo r.git --passes blob-xform,remap --blob-xform.ext.py.cmd 'black -q -'
+gfx --repo r.git --passes blob-xform,remap --blob-xform.ext.go.cmd 'gofmt'
+```
+
+**Pin the formatter version and flags.** Formatting output legitimately
+changes between tool versions (rustfmt's stability guarantee only covers
+already-formatted output under the same style edition; configuration
+defaults can drift). A pinned, flag-exact command makes the rewrite
+reproducible; an unpinned one makes history depend on which machine ran
+it. A command that never terminates hangs the run (no per-blob timeout).
+
+**Dangling blobs are expected.** When every use of a blob matched a path
+rule, the original blob remains in the imported history unreferenced —
+`git fsck` reports it as dangling and `git gc` collects it. This is the
+documented trade for keeping non-matching uses correct (plan
+R2/R6), not corruption.
+
 - **Chain order is argv order**:
   `--blob-xform.crlf-to-lf --blob-xform.trim-trailing-whitespace` runs the
   line-ending fix first. Any stage failing retains the *original* bytes,

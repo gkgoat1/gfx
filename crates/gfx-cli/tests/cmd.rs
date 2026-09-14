@@ -233,3 +233,70 @@ fn factory_builds_path_rule_cmd_stages() {
         other => panic!("{other:?}"),
     }
 }
+
+/// Pinned-recipe E2E (plan-blob-xform-paths.md §6): a real rustfmt, when
+/// one is on PATH. This test pins the *recipe* operators copy, not the
+/// machinery (which the shell stand-ins above cover); it skips cleanly
+/// when rustfmt is unavailable or too old for the flags.
+#[test]
+fn rustfmt_path_rule_recipe() {
+    if std::process::Command::new("rustfmt")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| !s.success())
+        .unwrap_or(true)
+    {
+        eprintln!("rustfmt not on PATH; skipping recipe test");
+        return;
+    }
+
+    let base = tmpdir("rustfmt");
+    let work = base.join("work");
+    let bare = base.join("bare.git");
+    std::fs::create_dir_all(&work).unwrap();
+    git(&base, &["init", "-q", "work"]);
+    let id = ["-c", "user.email=t@t", "-c", "user.name=T"];
+    std::fs::write(work.join("main.rs"), b"fn main(  ) { println!( \"hi\" ) ; }\n").unwrap();
+    std::fs::write(work.join("lib.rs"), b"fn broken( { this is not rust\n").unwrap();
+    git(&work, &["add", "."]);
+    git(&work, &[&id[..], &["commit", "-qm", "unformatted"][..]].concat());
+    git(&base, &["clone", "-q", "--bare", "work", "bare.git"]);
+    let _ = std::fs::remove_dir_all(&work);
+
+    let cfg = BlobXformConfig {
+        path_rules: vec![gfx::gfx_blob_xform::PathRule {
+            extension: b"rs".to_vec(),
+            transforms: vec![SharedBlobTransform(std::sync::Arc::new(CmdTransform {
+                cmd: "rustfmt --edition 2021 --emit stdout".into(),
+                capture_limit: DEFAULT_CAPTURE_LIMIT,
+            }))],
+            skip_larger_than: None,
+            max_output_bytes: None,
+        }],
+        ..BlobXformConfig::default()
+    };
+    let mut d = PassDriver::new(&bare)
+        .unwrap()
+        .with_passes(vec![
+            PassSpec::BlobXform(cfg),
+            PassSpec::Remap(gfx::gfx_remap::RemapConfig::default()),
+        ])
+        .unwrap();
+    let report = d.run().unwrap();
+
+    gfx::git::process::fsck(&bare).expect("fsck --strict");
+    let formatted = git(&bare, &["show", "HEAD:main.rs"]);
+    let text = String::from_utf8(formatted).unwrap();
+    assert!(text.contains("fn main() {"), "rustfmt formatted: {text:?}");
+    // D1 at work: the unparseable file is retained byte-for-byte.
+    assert_eq!(
+        git(&bare, &["show", "HEAD:lib.rs"]),
+        b"fn broken( { this is not rust\n",
+        "rustfmt failure ⇒ original retained"
+    );
+    let detail = &report.passes[0].detail;
+    assert!(detail.contains("failed=1"), "{detail}");
+    let _ = std::fs::remove_dir_all(&base);
+}
