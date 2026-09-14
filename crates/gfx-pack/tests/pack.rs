@@ -113,6 +113,8 @@ fn pack_two_repos_structure_and_checksums() {
         record_source_paths: false,
         encrypt: None,
         jobs: None,
+        save_remotes: false,
+        allow_credential_urls: false,
         progress: false,
     })
     .expect("pack");
@@ -189,7 +191,9 @@ fn pack_is_byte_deterministic() {
             record_source_paths: false,
             encrypt: None,
             jobs: None,
-            progress: false,
+            save_remotes: false,
+        allow_credential_urls: false,
+        progress: false,
         })
         .expect("pack")
     };
@@ -245,7 +249,9 @@ fn pack_is_deterministic_under_parallelism() {
             record_source_paths: false,
             encrypt: None,
             jobs,
-            progress: false,
+            save_remotes: false,
+        allow_credential_urls: false,
+        progress: false,
         })
         .expect("pack")
     };
@@ -280,6 +286,8 @@ fn redact_ordinals_are_shared_across_repos() {
         record_source_paths: false,
         encrypt: None,
         jobs: None,
+        save_remotes: false,
+        allow_credential_urls: false,
         progress: false,
     })
     .expect("pack");
@@ -324,6 +332,8 @@ fn dry_run_writes_no_archive() {
         record_source_paths: false,
         encrypt: None,
         jobs: None,
+        save_remotes: false,
+        allow_credential_urls: false,
         progress: false,
     })
     .expect("dry-run pack");
@@ -346,6 +356,8 @@ fn usage_errors_are_caught_early() {
         record_source_paths: false,
         encrypt: None,
         jobs: None,
+        save_remotes: false,
+        allow_credential_urls: false,
         progress: false,
     };
     // Duplicate slug.
@@ -398,6 +410,8 @@ fn strip_blobs_compose_in_pack() {
         record_source_paths: false,
         encrypt: None,
         jobs: None,
+        save_remotes: false,
+        allow_credential_urls: false,
         progress: false,
     })
     .expect("pack");
@@ -410,5 +424,175 @@ fn strip_blobs_compose_in_pack() {
         !stream.windows(7).any(|w| w == b"big.bin"),
         "stripped path absent from archived stream"
     );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+// ---------------------------------------------------------------------------
+// Remote-data capture (plan-remote-data.md M1).
+
+fn add_remote_config(repo: &Path) {
+    git(repo, &["config", "remote.origin.url", "https://example.com/org/r.git"]);
+    git(repo, &["config", "remote.origin.pushurl", "ssh://git@example.com/org/r.git"]);
+    git(repo, &["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"]);
+    git(repo, &["config", "--add", "remote.origin.fetch", "+refs/tags/*:refs/tags/*"]);
+    git(repo, &["config", "branch.main.remote", "origin"]);
+    git(repo, &["config", "branch.main.merge", "refs/heads/main"]);
+    git(repo, &["config", "credential.helper", "store"]); // executable: must NOT travel
+}
+
+#[test]
+fn pack_save_remotes_captures_allowlisted_config() {
+    let base = tmpdir("rmt");
+    let a = make_repo(&base, "alpha", "Alice|alice@x.com", "Alice|alice@x.com");
+    add_remote_config(&a);
+    let b = make_repo(&base, "beta", "Bob|bob@y.com", "Bob|bob@y.com"); // no remotes
+    let out = base.join("out.gfxpack");
+
+    let report = pack(&PackOptions {
+        repos: vec![
+            PackRepo { name: "alpha".into(), path: a },
+            PackRepo { name: "beta".into(), path: b },
+        ],
+        passes: remap_only(),
+        flags_audit: Default::default(),
+        out: out.clone(),
+        dry_run: false,
+        record_source_paths: false,
+        encrypt: None,
+        jobs: None,
+        save_remotes: true,
+        allow_credential_urls: false,
+        progress: false,
+    })
+    .expect("pack");
+
+    // Per-repo report.
+    let rs = report.repos[0].remotes_saved.as_ref().expect("alpha captured");
+    assert_eq!(rs.keys, 5, "url/pushurl/fetch + 2 branch keys (fetch counts once)");
+    assert_eq!(rs.skipped, 1, "credential.helper dropped (D2)");
+    // beta is a bare clone: clone itself recorded `remote.origin.url`
+    // (a host path — saving remotes exposes it, like record-source-paths;
+    // documented in M4). One key, nothing skipped.
+    let rsb = report.repos[1].remotes_saved.as_ref().unwrap();
+    assert_eq!(rsb.keys, 1, "bare clone's origin url: {rsb:?}");
+    assert_eq!(rsb.skipped, 0);
+
+    // Archive member: exact NUL-framed state, allowlisted only.
+    let mut z = open_archive(&out);
+    let member = z.extract("remotes/alpha.config").expect("member present");
+    let state = gfx::remotes::RemoteState::parse_z(&member).unwrap();
+    let keys: Vec<&str> = state.entries.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(
+        keys,
+        vec![
+            "remote.origin.url",
+            "remote.origin.pushurl",
+            "remote.origin.fetch",
+            "remote.origin.fetch",
+            "branch.main.remote",
+            "branch.main.merge",
+        ],
+        "allowlisted, config order, multi-valued fetch preserved"
+    );
+    let beta_state =
+        gfx::remotes::RemoteState::parse_z(&z.extract("remotes/beta.config").unwrap()).unwrap();
+    assert_eq!(
+        beta_state.entries.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(),
+        vec!["remote.origin.url"],
+        "only the clone-recorded origin url"
+    );
+
+    // Manifest pins the member bytes (C4).
+    let manifest = gfx_pack::manifest::Manifest::parse(
+        std::str::from_utf8(&z.extract(MANIFEST_ENTRY).unwrap()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        manifest.repos[0].remotes_sha256.as_deref(),
+        Some(gfx_pack::sha256_hex(&member).as_str()),
+        "remotes-sha256 pins the member bytes"
+    );
+    assert!(manifest.repos[1].remotes_sha256.is_some());
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn pack_save_remotes_fails_closed_on_credential_urls() {
+    let base = tmpdir("rmtc");
+    let a = make_repo(&base, "alpha", "Alice|alice@x.com", "Alice|alice@x.com");
+    git(&a, &["config", "remote.origin.url", "https://ci-user:sekret-token@example.com/r.git"]);
+
+    let mk = |allow: bool| PackOptions {
+        repos: vec![PackRepo { name: "alpha".into(), path: a.clone() }],
+        passes: remap_only(),
+        flags_audit: Default::default(),
+        out: base.join(if allow { "ok.gfxpack" } else { "no.gfxpack" }),
+        dry_run: false,
+        record_source_paths: false,
+        encrypt: None,
+        jobs: None,
+        save_remotes: true,
+        allow_credential_urls: allow,
+        progress: false,
+    };
+
+    let err = pack(&mk(false)).expect_err("credential URL must fail closed (D3)");
+    let msg = err.to_string();
+    assert!(msg.contains("credentials"), "{msg}");
+    assert!(msg.contains("remote.origin.url"), "names the key, not the value: {msg}");
+    assert!(!msg.contains("sekret-token"), "never echo the secret: {msg}");
+    assert!(!base.join("no.gfxpack").exists(), "no partial archive");
+
+    // Explicit override captures the URL verbatim (restore needs it).
+    pack(&mk(true)).expect("override");
+    let mut z = open_archive(&base.join("ok.gfxpack"));
+    let member = z.extract("remotes/alpha.config").unwrap();
+    let state = gfx::remotes::RemoteState::parse_z(&member).unwrap();
+    assert_eq!(
+        state.get_all("remote.origin.url"),
+        vec!["https://ci-user:sekret-token@example.com/r.git"],
+        "verbatim capture under the override"
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn pack_save_remotes_deterministic_under_parallelism() {
+    // D6 × plan-remote-data: capture happens in export workers; archives
+    // must not depend on job count.
+    let mk_repos = |tag: &str| -> (PathBuf, Vec<PackRepo>) {
+        let base = tmpdir(tag);
+        let names = ["r1", "r2", "r3", "r4"];
+        let mut repos = Vec::new();
+        for n in names {
+            let p = make_repo(&base, n, "Alice|alice@x.com", "Alice|alice@x.com");
+            add_remote_config(&p);
+            repos.push(PackRepo { name: n.to_string(), path: p });
+        }
+        (base, repos)
+    };
+    let (base, repos) = mk_repos("rmtdet");
+    let build = |jobs: usize, out: &str| -> Vec<u8> {
+        pack(&PackOptions {
+            repos: repos.clone(),
+            passes: remap_only(),
+            flags_audit: Default::default(),
+            out: base.join(out),
+            dry_run: false,
+            record_source_paths: false,
+            encrypt: None,
+            jobs: Some(jobs),
+            save_remotes: true,
+            allow_credential_urls: false,
+            progress: false,
+        })
+        .expect("pack");
+        std::fs::read(base.join(out)).unwrap()
+    };
+    let one = build(1, "j1.gfxpack");
+    let four = build(4, "j4.gfxpack");
+    assert_eq!(one, four, "byte-identical archives across --jobs (D6)");
     let _ = std::fs::remove_dir_all(&base);
 }

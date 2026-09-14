@@ -54,6 +54,23 @@ pub struct PackOptions {
     pub jobs: Option<usize>,
     /// Emit per-repo progress lines to stderr.
     pub progress: bool,
+    /// Capture each repo's allowlisted remote data into
+    /// `remotes/<name>.config` members + `remotes-sha256` manifest keys
+    /// (plan-remote-data.md). Off by default — archives may travel, and
+    /// remote URLs can be sensitive.
+    pub save_remotes: bool,
+    /// Permit capturing URLs that embed credentials (userinfo). Without
+    /// this, a credential-bearing URL fails the pack closed (D3).
+    pub allow_credential_urls: bool,
+}
+
+/// Remote-data capture summary for one repo (plan-remote-data.md D8).
+#[derive(Clone, Debug)]
+pub struct RemotesSaved {
+    /// Allowlisted keys captured (multi-valued keys count once).
+    pub keys: u64,
+    /// Remote-domain keys dropped by the allowlist (D2).
+    pub skipped: u64,
 }
 
 /// Per-repo outcome summary.
@@ -67,6 +84,9 @@ pub struct RepoPackReport {
     pub identity: bool,
     pub sha256: String,
     pub passes: Vec<PassSummary>,
+    /// Remote-data capture outcome; `Some` whenever `--pack.save-remotes`
+    /// was on, even when the repo had nothing allowlisted (keys=0).
+    pub remotes_saved: Option<RemotesSaved>,
 }
 
 /// What a pack run did.
@@ -95,6 +115,19 @@ impl PackReport {
                 "repo {}: commits={} rewritten={} identity={} stream-bytes={} sha256={}\n",
                 r.name, r.commits, r.rewritten, r.identity, r.output_bytes, r.sha256
             ));
+            if let Some(rs) = &r.remotes_saved {
+                if rs.keys == 0 {
+                    s.push_str(&std::format!(
+                        "  remotes: none saved ({} remote-domain keys skipped)\n",
+                        rs.skipped
+                    ));
+                } else {
+                    s.push_str(&std::format!(
+                        "  remotes: saved={} skipped={}\n",
+                        rs.keys, rs.skipped
+                    ));
+                }
+            }
             s.push_str("  passes:\n");
             for p in &r.passes {
                 s.push_str(&std::format!("    - {}: {}\n", p.name, p.detail));
@@ -406,7 +439,16 @@ struct RepoArtifacts {
     commit_map: String,
     ref_map: String,
     redact: Option<(RedactReport, String)>,
+    remotes: Option<CapturedRemotes>,
     out_spool: PathBuf,
+}
+
+/// A repo's allowlisted remote data, captured at export time
+/// (plan-remote-data.md). `bytes` is the NUL-framed serialized state.
+#[derive(Clone)]
+struct CapturedRemotes {
+    bytes: Vec<u8>,
+    saved: RemotesSaved,
 }
 
 /// Run `f` over `0..n` on a bounded scoped-thread pool, collecting results
@@ -485,20 +527,48 @@ pub fn pack(opts: &PackOptions) -> Result<PackReport, PackError> {
 
     // 1. Export each repo (read-only) to a spool; record object format.
     //    Parallel (D6): subprocess-bound and independent per repo.
-    let exports: Vec<(PathBuf, gfx::core::ObjectFormat)> = run_pool(n, jobs, |i| {
-        let r = &opts.repos[i];
-        let fmt = git::object_format(&r.path)?;
-        let bytes = git::export_stream(&r.path, &[])?;
-        let spool = spools.join(&std::format!("export-{}.fi", r.name));
-        std::fs::write(&spool, &bytes)?;
-        if opts.progress {
-            eprintln!("gfx pack: [{}/{}] {} exported ({} bytes)", i + 1, n, r.name, bytes.len());
-        }
-        Ok((spool, fmt))
-    })?;
+    //    plan-remote-data.md: when `--pack.save-remotes` is on, capture
+    //    the allowlisted remote data in the same per-repo step. The
+    //    credential guard fails the whole pack closed (D3) unless the
+    //    operator explicitly opted in.
+    let exports: Vec<(PathBuf, gfx::core::ObjectFormat, Option<CapturedRemotes>)> =
+        run_pool(n, jobs, |i| {
+            let r = &opts.repos[i];
+            let fmt = git::object_format(&r.path)?;
+            let bytes = git::export_stream(&r.path, &[])?;
+            let spool = spools.join(&std::format!("export-{}.fi", r.name));
+            std::fs::write(&spool, &bytes)?;
+            let remotes = if opts.save_remotes {
+                let out = gfx::remotes::capture(&r.path)
+                    .map_err(|e| PackError::Usage(std::format!("repo {:?}: {e}", r.name)))?;
+                if !out.credential_keys.is_empty() && !opts.allow_credential_urls {
+                    return Err(PackError::Usage(std::format!(
+                        "repo {:?}: remote URLs embed credentials (keys: {}); refusing to write \
+                         them into an archive. Remove the credentials from the URLs, encrypt the \
+                         archive (--pack.encrypt*), or pass --pack.allow-credential-urls to \
+                         acknowledge.",
+                        r.name,
+                        out.credential_keys.join(", ")
+                    )));
+                }
+                Some(CapturedRemotes {
+                    bytes: out.state.serialize_z(),
+                    saved: RemotesSaved {
+                        keys: out.state.entries.iter().map(|(k, _)| k.clone()).collect::<std::collections::BTreeSet<_>>().len() as u64,
+                        skipped: out.skipped,
+                    },
+                })
+            } else {
+                None
+            };
+            if opts.progress {
+                eprintln!("gfx pack: [{}/{}] {} exported ({} bytes)", i + 1, n, r.name, bytes.len());
+            }
+            Ok((spool, fmt, remotes))
+        })?;
 
     // 2. D3 shared ordinal idents (sequential pre-scan over all exports).
-    let spool_paths: Vec<PathBuf> = exports.iter().map(|(p, _)| p.clone()).collect();
+    let spool_paths: Vec<PathBuf> = exports.iter().map(|(p, _, _)| p.clone()).collect();
     let (passes, shared_idents) = resolve_shared_idents(&spool_paths, &passes)?;
 
     // 3. Transform each repo in parallel; spool the output with its
@@ -506,7 +576,7 @@ pub fn pack(opts: &PackOptions) -> Result<PackReport, PackError> {
     //    order — assembly is deterministic (D6).
     let artifacts: Vec<RepoArtifacts> = run_pool(n, jobs, |i| {
         let r = &opts.repos[i];
-        let (spool_in, fmt) = &exports[i];
+        let (spool_in, fmt, remotes) = &exports[i];
         let input = std::fs::read(spool_in)?;
         let out = transform_stream(&input, &passes)?;
         let spool_out = spools.join(&std::format!("stream-{}.fi", r.name));
@@ -546,6 +616,10 @@ pub fn pack(opts: &PackOptions) -> Result<PackReport, PackError> {
                 rewritten: out.commits_rewritten as u64,
                 identity: out.identity,
                 refs: tips,
+                remotes_sha256: remotes
+                    .as_ref()
+                    .filter(|cr| !cr.bytes.is_empty())
+                    .map(|cr| crate::sha256_hex(&cr.bytes)),
             },
             report: RepoPackReport {
                 name: r.name.clone(),
@@ -556,7 +630,9 @@ pub fn pack(opts: &PackOptions) -> Result<PackReport, PackError> {
                 identity: out.identity,
                 sha256,
                 passes: passes_summary,
+                remotes_saved: remotes.as_ref().map(|cr| cr.saved.clone()),
             },
+            remotes: remotes.clone(),
             commit_map: commit_map_text(commit_map),
             ref_map,
             redact: out.redact_report.as_ref().map(|rr| (rr.clone(), rr.to_text())),
@@ -572,6 +648,7 @@ pub fn pack(opts: &PackOptions) -> Result<PackReport, PackError> {
     let mut ref_maps: Vec<String> = Vec::new();
     let mut redact_reports: Vec<(String, RedactReport)> = Vec::new();
     let mut redact_texts: Vec<Option<String>> = Vec::new();
+    let mut remotes_members: Vec<Option<CapturedRemotes>> = Vec::new();
     for a in artifacts {
         if let Some((rr, text)) = a.redact {
             redact_reports.push((a.entry.name.clone(), rr));
@@ -581,6 +658,7 @@ pub fn pack(opts: &PackOptions) -> Result<PackReport, PackError> {
         }
         entries.push(a.entry);
         reports.push(a.report);
+        remotes_members.push(a.remotes);
         out_spools.push(a.out_spool);
         commit_maps.push(a.commit_map);
         ref_maps.push(a.ref_map);
@@ -625,13 +703,13 @@ pub fn pack(opts: &PackOptions) -> Result<PackReport, PackError> {
                 let file = std::fs::File::create(&tmp_out)?;
                 let age = crate::crypto::encrypt_writer(file, spec)?;
                 let mut zip = ZipWriter::new(age);
-                finish_archive(&mut zip, &opts.repos, &out_spools, &commit_maps, &ref_maps, &redact_reports, &redact_texts, &reports, &manifest_text, &opts)?;
+                finish_archive(&mut zip, &opts.repos, &out_spools, &commit_maps, &ref_maps, &redact_reports, &redact_texts, &remotes_members, &reports, &manifest_text, &opts)?;
                 zip.finish()?.finish()?;
             }
             None => {
                 let file = std::fs::File::create(&tmp_out)?;
                 let mut zip = ZipWriter::new(file);
-                finish_archive(&mut zip, &opts.repos, &out_spools, &commit_maps, &ref_maps, &redact_reports, &redact_texts, &reports, &manifest_text, &opts)?;
+                finish_archive(&mut zip, &opts.repos, &out_spools, &commit_maps, &ref_maps, &redact_reports, &redact_texts, &remotes_members, &reports, &manifest_text, &opts)?;
                 zip.finish()?;
             }
         }
@@ -664,6 +742,7 @@ fn finish_archive<W: Write>(
     ref_maps: &[String],
     redact_reports: &[(String, RedactReport)],
     redact_texts: &[Option<String>],
+    remotes_members: &[Option<CapturedRemotes>],
     reports: &[RepoPackReport],
     manifest_text: &str,
     opts: &PackOptions,
@@ -697,6 +776,19 @@ fn finish_archive<W: Write>(
                     Method::Deflate,
                     text.as_bytes(),
                 )?;
+            }
+            if let Some(cr) = &remotes_members[i] {
+                if !cr.bytes.is_empty() {
+                    // NUL-framed config (plan-remote-data.md D4); stored
+                    // verbatim — it is exact state, not prose. Deflate is
+                    // pointless on tiny config but keeps the archive
+                    // uniform; Store would also be fine.
+                    zip.write_entry_bytes(
+                        &std::format!("remotes/{}.config", r.name),
+                        Method::Deflate,
+                        &cr.bytes,
+                    )?;
+                }
             }
         }
         if let Some(merged) = merge_redact_reports(&redact_reports) {

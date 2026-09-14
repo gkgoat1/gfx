@@ -59,6 +59,8 @@ fn opts(repos: Vec<PackRepo>, passes: Vec<PassSpec>, out: PathBuf) -> PackOption
         record_source_paths: false,
         encrypt: None,
         jobs: None,
+        save_remotes: false,
+        allow_credential_urls: false,
         progress: false,
     }
 }

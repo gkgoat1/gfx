@@ -69,6 +69,10 @@ pub struct RepoEntry {
     /// The pass pipeline left the stream byte-identical to the export.
     pub identity: bool,
     pub refs: Vec<RefTip>,
+    /// Lowercase hex SHA-256 of the `remotes/<name>.config` member, when
+    /// the pack captured remote data (plan-remote-data.md D4). Absent in
+    /// older archives and when the repo had no allowlisted remote data.
+    pub remotes_sha256: Option<String>,
 }
 
 /// The archive manifest.
@@ -150,6 +154,11 @@ impl Manifest {
             s.push_str(&std::format!("commits = {}\n", r.commits));
             s.push_str(&std::format!("rewritten = {}\n", r.rewritten));
             s.push_str(&std::format!("identity = {}\n", r.identity));
+            if let Some(rh) = &r.remotes_sha256 {
+                s.push_str("remotes-sha256 = ");
+                push_toml_string(&mut s, rh);
+                s.push('\n');
+            }
             for t in &r.refs {
                 s.push_str("\n[[repo.refs]]\n");
                 s.push_str("name = ");
@@ -270,6 +279,24 @@ impl Manifest {
                 .and_then(|v| v.as_bool())
                 .ok_or_else(|| m_err(format!("repo {name:?}: missing bool `identity`")))?;
 
+            // plan-remote-data.md D4: optional; validated like `sha256`.
+            let remotes_sha256 = match t.get("remotes-sha256") {
+                None => None,
+                Some(v) => {
+                    let rh = v.as_str().ok_or_else(|| {
+                        m_err(format!("repo {name:?}: `remotes-sha256` must be a string"))
+                    })?;
+                    if rh.len() != 64
+                        || !rh.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    {
+                        return Err(m_err(format!(
+                            "repo {name:?}: `remotes-sha256` must be 64 lowercase hex"
+                        )));
+                    }
+                    Some(rh.to_string())
+                }
+            };
+
             let mut refs = Vec::new();
             if let Some(rf) = t.get("refs") {
                 let arr = rf
@@ -328,6 +355,7 @@ impl Manifest {
                 name,
                 identity,
                 refs,
+                remotes_sha256,
             });
         }
 
@@ -354,6 +382,7 @@ mod tests {
                 commits: 5,
                 rewritten: 2,
                 identity: false,
+                remotes_sha256: None,
                 refs: vec![
                     RefTip {
                         name: "refs/heads/main".into(),

@@ -26,6 +26,17 @@ fn pack_globals() -> Vec<ArgSpec> {
         ArgSpec::flag("dry-run", "export, run passes, report — no archive written"),
         ArgSpec::value("config", None, "TOML config file with pass flag defaults (CLI flags override)"),
         ArgSpec::flag("record-source-paths", "record original source paths in meta/source-hints.toml"),
+        ArgSpec::flag(
+            "save-remotes",
+            "capture each repo's allowlisted remote data (remote URLs, fetch specs, branch \
+             tracking) into remotes/<name>.config members for --unpack.restore-remotes \
+             (plan-remote-data.md); fails closed on credential-bearing URLs",
+        ),
+        ArgSpec::flag(
+            "allow-credential-urls",
+            "permit --pack.save-remotes to capture URLs that embed credentials (userinfo); \
+             consider --pack.encrypt* — the archive will contain live secrets",
+        ),
         ArgSpec::value("jobs", None, "worker threads for export/transform (default: available parallelism)"),
         ArgSpec::multi("encrypt", "age-encrypt the archive to this age1... recipient (repeatable; output gains .age)"),
         ArgSpec::flag("encrypt-passphrase", "age-encrypt the archive with a passphrase (from GFX_PACK_PASSPHRASE)"),
@@ -138,6 +149,8 @@ fn try_run_pack(
         out: out_path.unwrap_or_default(),
         dry_run,
         record_source_paths: map.flag("record-source-paths"),
+        save_remotes: map.flag("save-remotes"),
+        allow_credential_urls: map.flag("allow-credential-urls"),
         encrypt,
         jobs: match map.value("jobs") {
             None => None,
