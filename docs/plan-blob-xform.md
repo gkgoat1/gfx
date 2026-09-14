@@ -2,10 +2,10 @@
 
 | Field    | Value |
 |----------|-------|
-| Status   | Implemented (M0–M2; M3 hardening next) |
+| Status   | Implemented (M0–M3) |
 | Scope    | builtin pass: run a fallible `Vec<u8>`/`String` transform over every blob; alter on success, retain original on failure |
 | Depends  | plan-fast-export.md §5 (architecture), §6 (builtin framework); plan-pass-driver-strip-blobs.md §4 (driver, registry), §5.2 (injected-predicate pattern); plan-redact-idents.md (injected `IdentPolicy` pattern); plan-multistream-pack.md M4 (Send/Sync shared handles) |
-| Updated  | 2026-09-13 (M2 external-command adapter; see [rewrite-cli.md](rewrite-cli.md) for the user-facing surface) |
+| Updated  | 2026-09-13 (M3 hardening; see [rewrite-cli.md](rewrite-cli.md) for the user-facing surface) |
 
 ---
 

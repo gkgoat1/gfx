@@ -166,7 +166,13 @@ fn pack_is_byte_deterministic() {
     let mk = |out: PathBuf| {
         pack(&PackOptions {
             repos: vec![PackRepo { name: "alpha".into(), path: a.clone() }],
-            passes: vec![redact_ordinal()],
+            passes: vec![
+                PassSpec::BlobXform(gfx::gfx_blob_xform::BlobXformConfig {
+                    transforms: gfx::gfx_blob_xform::builtins::all(),
+                    ..Default::default()
+                }),
+                redact_ordinal(),
+            ],
             flags_audit: Default::default(),
             out,
             dry_run: false,
@@ -191,8 +197,9 @@ fn pack_is_byte_deterministic() {
 #[test]
 fn pack_is_deterministic_under_parallelism() {
     // D6: archive bytes are independent of worker count and completion
-    // order. Four repos, redact (forces the shared-ordinal pre-scan), jobs
-    // 1 vs 4 ⇒ byte-identical archives.
+    // order. Four repos, a blob-xform + redact chain (transforms under
+    // fan-out AND the shared-ordinal pre-scan), jobs 1 vs 4 ⇒
+    // byte-identical archives.
     let base = tmpdir("par");
     let repos: Vec<PackRepo> = ["r1", "r2", "r3", "r4"]
         .iter()
@@ -204,7 +211,13 @@ fn pack_is_deterministic_under_parallelism() {
     let mk = |jobs: Option<usize>, out: PathBuf| {
         pack(&PackOptions {
             repos: repos.clone(),
-            passes: vec![redact_ordinal()],
+            passes: vec![
+                PassSpec::BlobXform(gfx::gfx_blob_xform::BlobXformConfig {
+                    transforms: gfx::gfx_blob_xform::builtins::all(),
+                    ..Default::default()
+                }),
+                redact_ordinal(),
+            ],
             flags_audit: Default::default(),
             out,
             dry_run: false,

@@ -12,6 +12,7 @@ libfuzzer-sys = "0.4"
 gfx-strip-blobs = { path = "../crates/gfx-strip-blobs" }
 gfx-redact = { path = "../crates/gfx-redact" }
 gfx-core = { path = "../crates/gfx-core" }
+gfx-blob-xform = { path = "../crates/gfx-blob-xform" }
 gfx-pack = { path = "../crates/gfx-pack" }
 
 [[bin]]
@@ -31,6 +32,13 @@ bench = false
 [[bin]]
 name = "strip_roundtrip"
 path = "fuzz_targets/strip_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "blob_xform_roundtrip"
+path = "fuzz_targets/blob_xform_roundtrip.rs"
 test = false
 doc = false
 bench = false

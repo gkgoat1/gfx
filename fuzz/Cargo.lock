@@ -618,10 +618,18 @@ dependencies = [
 name = "gfx"
 version = "0.1.0"
 dependencies = [
+ "gfx-blob-xform",
  "gfx-core",
  "gfx-redact",
  "gfx-remap",
  "gfx-strip-blobs",
+]
+
+[[package]]
+name = "gfx-blob-xform"
+version = "0.1.0"
+dependencies = [
+ "gfx-core",
 ]
 
 [[package]]
@@ -635,6 +643,7 @@ dependencies = [
 name = "gfx-fuzz"
 version = "0.0.0"
 dependencies = [
+ "gfx-blob-xform",
  "gfx-core",
  "gfx-pack",
  "gfx-redact",

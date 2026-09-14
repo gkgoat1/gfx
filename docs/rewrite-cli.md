@@ -183,7 +183,17 @@ usual (remap owns that bookkeeping).
 - Standalone `blob` events carry no file mode: byte-level transforms like
   `crlf-to-lf` apply to *every* blob, binaries included. If a blob must
   not be touched, gate it with `--blob-xform.skip-larger-than` or keep
-  binary history out of scope (the symlink caveat: plan-blob-xform.md D5).
+  binary history out of scope.
+- **Symlink hazard (plan-blob-xform.md D5):** a symlink's target path is
+  stored as blob bytes, and standalone blobs arrive before the commits
+  that reference them, so the pass cannot know a blob is a symlink target.
+  A transform that touches trailing bytes (`trim-trailing-whitespace`,
+  `ensure-final-newline`) can therefore rewrite a symlink target — e.g.
+  a link to `/opt/data /x` becomes `/opt/data /x` trimmed, or gains a
+  newline. Inline `M` ops know their mode and skip `Symlink`/`Gitlink`
+  payloads by default; standalone blobs cannot. If your history has
+  symlinks with whitespace-sensitive targets, prefer injected,
+  content-aware transforms over the built-ins.
 
 ## Pre-sharing checklist
 

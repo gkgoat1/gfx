@@ -7,7 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-gfx = { workspace = true, features = ["std", "git", "remap", "strip-blobs", "redact"] }
+gfx = { workspace = true, features = ["std", "git", "remap", "strip-blobs", "redact", "blob-xform"] }
 gfx-redact = { workspace = true }
 flate2 = "1"
 crc32fast = "1"
