@@ -46,6 +46,10 @@ pub struct UnpackOptions {
     /// Passphrase for passphrase-encrypted archives (CLI sources it from
     /// `GFX_PACK_PASSPHRASE`, never argv).
     pub passphrase: Option<age::secrecy::SecretString>,
+    /// After import, apply the archived `remotes/<name>.config` member (if
+    /// any) to the fresh repo and drop the `refs/remotes/*` that rode the
+    /// stream (plan-remote-data.md D5). Off by default.
+    pub restore_remotes: bool,
 }
 
 /// Per-repo outcome.
@@ -68,6 +72,10 @@ pub struct RepoUnpackReport {
     pub status: RepoStatus,
     pub commits: u64,
     pub refs_checked: usize,
+    /// Remote-data restore outcome (plan-remote-data.md D8):
+    /// `Some((keys_set, refs_dropped))` when `--unpack.restore-remotes`
+    /// ran for this repo (keys_set=0 ⇒ no member archived).
+    pub remotes_restored: Option<(u64, u64)>,
 }
 
 /// What an unpack run did.
@@ -106,6 +114,15 @@ impl UnpackReport {
             ));
             if let Some(dest) = &r.dest {
                 s.push_str(&std::format!("  dest: {}\n", dest.display()));
+            }
+            if let Some((keys, dropped)) = r.remotes_restored {
+                if keys == 0 {
+                    s.push_str("  remotes: none saved\n");
+                } else {
+                    s.push_str(&std::format!(
+                        "  remotes: restored={keys} remote-refs-dropped={dropped}\n"
+                    ));
+                }
             }
         }
         s
@@ -165,6 +182,9 @@ struct Verified {
     /// classification (`-` new sides).
     commit_map: String,
     redact_map: Option<Vec<u8>>,
+    /// Raw `remotes/<name>.config` member bytes, hash-verified against
+    /// the manifest in [`verify_one`] (plan-remote-data.md D4).
+    remotes: Option<Vec<u8>>,
 }
 
 /// Extract one repo's stream to a spool, verifying the manifest checksum
@@ -196,10 +216,36 @@ fn verify_one(
     } else {
         None
     };
+    // plan-remote-data.md D4: member and manifest key must agree —
+    // member-without-pin or pin-without-member is tampering/corruption.
+    let remotes_entry = std::format!("remotes/{}.config", entry.name);
+    let remotes = match (zip.contains(&remotes_entry), &entry.remotes_sha256) {
+        (true, Some(pin)) => {
+            let bytes = zip.extract(&remotes_entry)?;
+            if crate::sha256_hex(&bytes) != *pin {
+                return Err(PackError::Checksum { repo: entry.name.clone() });
+            }
+            Some(bytes)
+        }
+        (false, None) => None,
+        (true, None) => {
+            return Err(PackError::Manifest(std::format!(
+                "repo {:?}: remotes member present but manifest has no remotes-sha256",
+                entry.name
+            )))
+        }
+        (false, Some(_)) => {
+            return Err(PackError::Manifest(std::format!(
+                "repo {:?}: manifest pins remotes-sha256 but the member is absent",
+                entry.name
+            )))
+        }
+    };
     Ok(Verified {
         spool,
         commit_map,
         redact_map,
+        remotes,
     })
 }
 
@@ -358,12 +404,32 @@ fn import_one(
 
     git::fsck(&dest)?;
 
+    // plan-remote-data.md D5: restore remote data (re-filtered through
+    // the allowlist inside `restore`), then drop the remote-tracking refs
+    // that rode the stream — on a fresh repo they falsely name rewritten
+    // commits as "what the server has"; the first fetch repopulates.
+    let mut remotes_restored = None;
+    if opts.restore_remotes {
+        let mut keys = 0u64;
+        if let Some(bytes) = &verified.remotes {
+            let state = gfx::remotes::RemoteState::parse_z(bytes)
+                .map_err(|e| PackError::Manifest(std::format!("repo {:?}: {e}", entry.name)))?;
+            let r = gfx::remotes::restore(&dest, &state, gfx::remotes::RestoreMode::Overwrite)
+                .map_err(|e| PackError::Usage(std::format!("repo {:?}: {e}", entry.name)))?;
+            keys = r.keys_set;
+        }
+        let dropped = gfx::remotes::drop_remote_refs(&dest)
+            .map_err(|e| PackError::Usage(std::format!("repo {:?}: {e}", entry.name)))?;
+        remotes_restored = Some((keys, dropped));
+    }
+
     Ok(RepoUnpackReport {
         name: entry.name.clone(),
         dest: Some(dest),
         status: RepoStatus::Imported,
         commits: entry.commits,
         refs_checked: entry.refs.len(),
+        remotes_restored,
     })
 }
 
@@ -418,6 +484,7 @@ pub fn unpack(opts: &UnpackOptions) -> Result<UnpackReport, PackError> {
                     status: RepoStatus::Failed(e.to_string()),
                     commits: entry.commits,
                     refs_checked: 0,
+                    remotes_restored: None,
                 });
             }
             Err(e) => return Err(e),
@@ -432,6 +499,7 @@ pub fn unpack(opts: &UnpackOptions) -> Result<UnpackReport, PackError> {
                 status: RepoStatus::Verified,
                 commits: entry.commits,
                 refs_checked: 0,
+                remotes_restored: None,
             });
         }
         sort_by_manifest(&manifest, &mut reports);
@@ -451,6 +519,7 @@ pub fn unpack(opts: &UnpackOptions) -> Result<UnpackReport, PackError> {
                     status: RepoStatus::Failed(e.to_string()),
                     commits: entry.commits,
                     refs_checked: 0,
+                    remotes_restored: None,
                 });
             }
             Err(e) => return Err(e),
