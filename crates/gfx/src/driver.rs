@@ -465,7 +465,11 @@ pub fn transform_stream(
                 })
                 .max()
                 .unwrap_or(0);
-            cfg.mark_base = Some(max_mark + 1);
+            // Adversarial streams can carry mark u64::MAX; real streams
+            // (sequential from 1) never get close.
+            cfg.mark_base = Some(max_mark.checked_add(1).ok_or(gfx_core::Error::Internal(
+                "stream marks exhaust u64; no room for synthetic blob marks",
+            ))?);
         }
         blob_xform = Some(gfx_blob_xform::BlobXform::new(cfg));
     }

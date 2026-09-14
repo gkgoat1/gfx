@@ -715,3 +715,63 @@ fn blob_xform_path_rules_created_once_across_many_uses() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn strip_blobs_can_strip_a_synthetic_blob() {
+    // Composition (plan-blob-xform-paths.md G5): blob-xform path rules
+    // emit synthetic blobs; a downstream strip-blobs stage treats them
+    // like any blob — here an inflating rule pushes the .rs payload past
+    // the strip threshold and the file disappears from history.
+    let base = tmpdir("bxs");
+    let work = base.join("work");
+    let bare = base.join("bare.git");
+    std::fs::create_dir_all(&work).unwrap();
+    git(&base, &["init","-q","work"]);
+    let id = ["-c","user.email=t@t","-c","user.name=T"];
+    std::fs::write(work.join("big.rs"), b"fn a() {}\n").unwrap();
+    std::fs::write(work.join("small.txt"), b"tiny\n").unwrap();
+    git(&work, &["add","."]);
+    git(&work, &[&id[..], &["commit","-qm","files"][..]].concat());
+    git(&base, &["clone","-q","--bare","work","bare.git"]);
+    let _ = std::fs::remove_dir_all(&work);
+
+    use gfx::gfx_blob_xform::{BlobXformConfig, PathRule, SharedBlobTransform};
+    let inflate = SharedBlobTransform(std::sync::Arc::new(
+        |blob: &[u8]| -> Result<Vec<u8>, ()> {
+            let mut v = blob.to_vec();
+            v.extend_from_slice(&[b'x'; 4096]);
+            Ok(v)
+        },
+    ));
+    let mut d = PassDriver::new(&bare)
+        .unwrap()
+        .with_passes(vec![
+            PassSpec::BlobXform(BlobXformConfig {
+                path_rules: vec![PathRule {
+                    extension: b"rs".to_vec(),
+                    transforms: vec![inflate],
+                    skip_larger_than: None,
+                    max_output_bytes: None,
+                }],
+                ..BlobXformConfig::default()
+            }),
+            PassSpec::StripBlobs(gfx_strip_blobs::StripBlobsConfig {
+                size_threshold: Some(1024),
+                ..Default::default()
+            }),
+            PassSpec::Remap(gfx_remap::RemapConfig::default()),
+        ])
+        .unwrap();
+    let report = d.run().unwrap();
+
+    gfx::git::process::fsck(&bare).expect("fsck --strict");
+    assert_eq!(git(&bare, &["show","HEAD:small.txt"]), b"tiny\n");
+    let out = git(&bare, &["ls-tree","-r","--name-only","HEAD"]);
+    let names = String::from_utf8(out).unwrap();
+    assert!(!names.contains("big.rs"), "inflated synthetic stripped: {names}");
+    assert!(names.contains("small.txt"));
+    let detail: Vec<&str> = report.passes.iter().map(|p| p.name).collect();
+    assert_eq!(detail, ["blob-xform", "strip-blobs", "remap"]);
+
+    let _ = std::fs::remove_dir_all(&base);
+}

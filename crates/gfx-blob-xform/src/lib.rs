@@ -458,11 +458,16 @@ impl BlobXform {
     /// emit the blob event immediately before the referencing commit.
     /// Returns the mark the op should reference — the original mark on
     /// any retention or unchanged verdict (D1/D2).
-    fn materialize(&mut self, out: &mut Vec<Event>, rule_ix: usize, original_mark: u64) -> u64 {
+    fn materialize(
+        &mut self,
+        out: &mut Vec<Event>,
+        rule_ix: usize,
+        original_mark: u64,
+    ) -> Result<u64, Error> {
         if let Some(&cached) = self.transformed.get(&(original_mark, rule_ix)) {
             let r = &mut self.report.rules[rule_ix];
             r.ops_examined += 1;
-            return match cached {
+            return Ok(match cached {
                 Cached::Synthetic(m) => {
                     r.ops_rewritten += 1;
                     m
@@ -479,7 +484,7 @@ impl BlobXform {
                     r.retained_guard += 1;
                     original_mark
                 }
-            };
+            });
         }
         let Some(original) = self.originals.get(&original_mark).cloned() else {
             // A mark with no cached original cannot occur in a
@@ -488,7 +493,7 @@ impl BlobXform {
             let r = &mut self.report.rules[rule_ix];
             r.ops_examined += 1;
             r.retained_failed += 1;
-            return original_mark;
+            return Ok(original_mark);
         };
         let outcome = self.judge_rule(&self.cfg.path_rules[rule_ix], &original, false);
         let verdict = match &outcome {
@@ -500,11 +505,13 @@ impl BlobXform {
         let r = &mut self.report.rules[rule_ix];
         r.ops_examined += 1;
         r.bytes_in += original.len() as u64;
-        match outcome {
+        Ok(match outcome {
             Outcome::Alter(new) => {
                 let new_len = new.len() as u64;
                 let synthetic = self.next_mark;
-                self.next_mark += 1;
+                self.next_mark = self.next_mark.checked_add(1).ok_or(Error::Internal(
+                    "blob-xform synthetic mark space exhausted",
+                ))?;
                 out.push(Event::Blob {
                     mark: Some(synthetic),
                     original_oid: None,
@@ -531,7 +538,7 @@ impl BlobXform {
                 }
                 original_mark
             }
-        }
+        })
     }
 }
 
@@ -613,7 +620,7 @@ impl gfx_core::Transform for BlobXform {
                                             r.retained_guard += 1;
                                         } else {
                                             let orig = *m;
-                                            let new = self.materialize(out, rule_ix, orig);
+                                            let new = self.materialize(out, rule_ix, orig)?;
                                             *m = new;
                                         }
                                     }

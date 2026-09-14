@@ -9,9 +9,24 @@
 
 use libfuzzer_sys::fuzz_target;
 
+fn xform_base(evs: &[gfx_core::Event]) -> Option<u64> {
+    use gfx_core::Event;
+    evs.iter()
+        .filter_map(|ev| match ev {
+            Event::Commit(c) => c.mark,
+            Event::Tag(t) => t.mark,
+            Event::Blob { mark, .. } => *mark,
+            _ => None,
+        })
+        .max()
+        .and_then(|m| m.checked_add(1))
+}
+
 fuzz_target!(|data: &[u8]| {
-    use gfx_blob_xform::{builtins, BlobTransform, BlobXform, BlobXformConfig, SharedBlobTransform};
-    use gfx_core::{Parser, ParseOptions, Transform};
+    use gfx_blob_xform::{
+        builtins, BlobTransform, BlobXform, BlobXformConfig, PathRule, SharedBlobTransform,
+    };
+    use gfx_core::{Event, Parser, ParseOptions, Transform};
     use std::sync::Arc;
 
     /// Adversarial injected transform driven by content bytes: fails when
@@ -31,8 +46,16 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    // Rotate configurations on stream nibble 0.
-    let cfg = match data.first().map(|b| b % 4) {
+    let rule = |ext: &[u8]| PathRule {
+        extension: ext.to_vec(),
+        transforms: vec![SharedBlobTransform(Arc::new(Adversarial))],
+        skip_larger_than: None,
+        max_output_bytes: None,
+    };
+    // Rotate configurations on stream nibble 0; variants 4–7 add path
+    // rules (plan-blob-xform-paths.md): synthetic marks, cached
+    // judgments, and mode guards under adversarial streams.
+    let mut cfg = match data.first().map(|b| b % 8) {
         Some(0) => BlobXformConfig {
             transforms: vec![SharedBlobTransform(Arc::new(builtins::CrlfToLf))],
             ..Default::default()
@@ -52,12 +75,31 @@ fuzz_target!(|data: &[u8]| {
             include_special_modes: true,
             ..Default::default()
         },
-        _ => BlobXformConfig {
+        Some(3) => BlobXformConfig {
             transforms: vec![
                 SharedBlobTransform(Arc::new(Adversarial)),
                 SharedBlobTransform(Arc::new(builtins::CrlfToLf)),
             ],
             include_inline: false,
+            ..Default::default()
+        },
+        Some(4) => BlobXformConfig { path_rules: vec![rule(b"rs")], ..Default::default() },
+        Some(5) => BlobXformConfig {
+            transforms: vec![SharedBlobTransform(Arc::new(builtins::CrlfToLf))],
+            path_rules: vec![rule(b"rs"), rule(b"py")],
+            ..Default::default()
+        },
+        Some(6) => BlobXformConfig {
+            path_rules: vec![rule(b"rs")],
+            include_special_modes: true,
+            include_inline: false,
+            ..Default::default()
+        },
+        _ => BlobXformConfig {
+            path_rules: vec![PathRule {
+                skip_larger_than: Some(64),
+                ..rule(b"rs")
+            }],
             ..Default::default()
         },
     };
@@ -67,6 +109,24 @@ fuzz_target!(|data: &[u8]| {
     let mut input_evs = Vec::new();
     while let Ok(Some(ev)) = parser.next_event() {
         input_evs.push(ev);
+    }
+
+    // D3: the driver computes this in production; mirror it here.
+    if !cfg.path_rules.is_empty() {
+        let max_mark = input_evs
+            .iter()
+            .filter_map(|ev| match ev {
+                Event::Commit(c) => c.mark,
+                Event::Tag(t) => t.mark,
+                Event::Blob { mark, .. } => *mark,
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        let Some(base) = max_mark.checked_add(1) else {
+            return; // u64::MAX marks: the driver errors; nothing to fuzz
+        };
+        cfg.mark_base = Some(base);
     }
 
     let mut xform = BlobXform::new(cfg);
@@ -80,7 +140,35 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    if xform.report().altered == 0 {
+    let report = xform.report();
+    let rule_rewrites: u64 = report.rules.iter().map(|r| r.ops_rewritten).sum();
+    if report.altered == 0 && rule_rewrites == 0 {
         assert_eq!(out, input_evs, "zero alterations ⇒ byte-exact retention");
+    }
+    // Synthetic marks: ≥ base, and each defined (as a blob) before any
+    // commit references it (R2/R3 made total).
+    if let Some(base) = xform_base(&input_evs) {
+        let mut defined: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
+        for ev in &out {
+            match ev {
+                Event::Blob { mark: Some(m), .. } => {
+                    defined.insert(*m);
+                }
+                Event::Commit(c) => {
+                    for op in &c.ops {
+                        if let gfx_core::FileOp::Modify {
+                            source: gfx_core::FileSource::DataRef(gfx_core::DataRef::Mark(m)),
+                            ..
+                        } = op
+                        {
+                            if *m >= base {
+                                assert!(defined.contains(m), "synthetic :{m} used before definition");
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 });

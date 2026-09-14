@@ -169,6 +169,16 @@ fn pack_is_byte_deterministic() {
             passes: vec![
                 PassSpec::BlobXform(gfx::gfx_blob_xform::BlobXformConfig {
                     transforms: gfx::gfx_blob_xform::builtins::all(),
+                    path_rules: vec![gfx::gfx_blob_xform::PathRule {
+                        extension: b"txt".to_vec(),
+                        transforms: vec![gfx::gfx_blob_xform::SharedBlobTransform(
+                            std::sync::Arc::new(|b: &[u8]| -> Result<Vec<u8>, ()> {
+                                Ok(b.iter().map(u8::to_ascii_uppercase).collect())
+                            }),
+                        )],
+                        skip_larger_than: None,
+                        max_output_bytes: None,
+                    }],
                     ..Default::default()
                 }),
                 redact_ordinal(),
@@ -197,9 +207,10 @@ fn pack_is_byte_deterministic() {
 #[test]
 fn pack_is_deterministic_under_parallelism() {
     // D6: archive bytes are independent of worker count and completion
-    // order. Four repos, a blob-xform + redact chain (transforms under
-    // fan-out AND the shared-ordinal pre-scan), jobs 1 vs 4 ⇒
-    // byte-identical archives.
+    // order. Four repos, a blob-xform (whole-blob + path rules) + redact
+    // chain — transforms under fan-out, per-repo synthetic mark bases
+    // (plan-blob-xform-paths.md D10), AND the shared-ordinal pre-scan —
+    // jobs 1 vs 4 ⇒ byte-identical archives.
     let base = tmpdir("par");
     let repos: Vec<PackRepo> = ["r1", "r2", "r3", "r4"]
         .iter()
@@ -214,6 +225,16 @@ fn pack_is_deterministic_under_parallelism() {
             passes: vec![
                 PassSpec::BlobXform(gfx::gfx_blob_xform::BlobXformConfig {
                     transforms: gfx::gfx_blob_xform::builtins::all(),
+                    path_rules: vec![gfx::gfx_blob_xform::PathRule {
+                        extension: b"txt".to_vec(),
+                        transforms: vec![gfx::gfx_blob_xform::SharedBlobTransform(
+                            std::sync::Arc::new(|b: &[u8]| -> Result<Vec<u8>, ()> {
+                                Ok(b.iter().map(u8::to_ascii_uppercase).collect())
+                            }),
+                        )],
+                        skip_larger_than: None,
+                        max_output_bytes: None,
+                    }],
                     ..Default::default()
                 }),
                 redact_ordinal(),
