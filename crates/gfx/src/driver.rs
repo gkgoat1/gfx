@@ -55,6 +55,8 @@ pub enum DriverError {
     Git(crate::git::process::GitError),
     Io(std::io::Error),
     Core(Error),
+    /// Remote-data capture/restore failure (plan-remote-data.md).
+    Remotes(crate::remotes::RemoteDataError),
 }
 
 impl fmt::Display for DriverError {
@@ -71,6 +73,7 @@ impl fmt::Display for DriverError {
             DriverError::Git(e) => write!(f, "{e}"),
             DriverError::Io(e) => write!(f, "i/o error: {e}"),
             DriverError::Core(e) => write!(f, "stream error: {e}"),
+            DriverError::Remotes(e) => write!(f, "{e}"),
         }
     }
 }
@@ -86,6 +89,12 @@ impl From<crate::git::process::GitError> for DriverError {
 impl From<Error> for DriverError {
     fn from(e: Error) -> Self {
         DriverError::Core(e)
+    }
+}
+
+impl From<crate::remotes::RemoteDataError> for DriverError {
+    fn from(e: crate::remotes::RemoteDataError) -> Self {
+        DriverError::Remotes(e)
     }
 }
 
@@ -143,6 +152,62 @@ impl PassSpec {
     }
 }
 
+/// Policy for `refs/remotes/*` across an in-repo rewrite
+/// (plan-remote-data.md D6).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RemoteRefsPolicy {
+    /// Status quo (C7): tracking refs ride the export/import stream and
+    /// end up naming rewritten commits — misleading until the next fetch
+    /// force-updates them (research finding R3).
+    #[default]
+    Rewrite,
+    /// Delete them post-import; the next fetch repopulates. Recommended
+    /// when the old objects should become unreachable (redaction).
+    Drop,
+    /// Restore the pre-rewrite OIDs. Keeps pre-rewrite objects reachable
+    /// — the operator's call, never the default.
+    Pin,
+}
+
+impl RemoteRefsPolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RemoteRefsPolicy::Rewrite => "rewrite",
+            RemoteRefsPolicy::Drop => "drop",
+            RemoteRefsPolicy::Pin => "pin",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "rewrite" => Some(RemoteRefsPolicy::Rewrite),
+            "drop" => Some(RemoteRefsPolicy::Drop),
+            "pin" => Some(RemoteRefsPolicy::Pin),
+            _ => None,
+        }
+    }
+}
+
+/// Remote-data summary for the run report (plan-remote-data.md D8).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RemotesSummary {
+    /// Allowlisted keys captured (0 when `--save-remotes` was off).
+    pub saved_keys: u64,
+    /// Remote-domain keys dropped by the allowlist (D2).
+    pub skipped: u64,
+    /// URL-valued keys carrying credentials (D3 — in-repo warns, never blocks).
+    pub credential_keys: Vec<String>,
+    /// Keys re-added by `--restore-remotes` (normally 0: the rewrite does
+    /// not touch config — R1 — so a nonzero value means something external
+    /// raced the run).
+    pub restored_keys: u64,
+    /// Keys whose live values differ from the snapshot; never overwritten.
+    pub drift: Vec<String>,
+    /// Applied refs/remotes policy and how many refs it touched.
+    pub refs_policy: RemoteRefsPolicy,
+    pub refs_affected: u64,
+}
+
 /// Per-pass summary for the run report.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PassSummary {
@@ -172,6 +237,10 @@ pub struct RunReport {
     /// Directory the artifacts were written to (run only; deliberately NOT
     /// part of `to_text`).
     pub artifacts_dir: Option<PathBuf>,
+    /// Remote-data capture/restore outcome; `Some` when any of
+    /// `--save-remotes` / `--restore-remotes` / a non-default
+    /// `--remote-refs` policy was requested (plan-remote-data.md D8).
+    pub remotes: Option<RemotesSummary>,
 }
 
 impl RunReport {
@@ -197,6 +266,26 @@ impl RunReport {
         for p in &self.passes {
             s.push_str(&format!("  - {}: {}\n", p.name, p.detail));
         }
+        if let Some(r) = &self.remotes {
+            s.push_str(&format!(
+                "remotes: saved={} skipped={} restored={} drift={} remote-refs={}:{}\n",
+                r.saved_keys,
+                r.skipped,
+                r.restored_keys,
+                r.drift.len(),
+                r.refs_policy.as_str(),
+                r.refs_affected
+            ));
+            if !r.credential_keys.is_empty() {
+                s.push_str(&format!(
+                    "remotes-warning: URLs with credentials captured in keys: {}\n",
+                    r.credential_keys.join(", ")
+                ));
+            }
+            for k in &r.drift {
+                s.push_str(&format!("remotes-drift: {k}\n"));
+            }
+        }
         s
     }
 }
@@ -209,6 +298,9 @@ pub struct PassDriver {
     repo: PathBuf,
     passes: Vec<PassSpec>,
     force: bool,
+    save_remotes: bool,
+    restore_remotes: bool,
+    remote_refs: RemoteRefsPolicy,
 }
 
 impl PassDriver {
@@ -221,7 +313,26 @@ impl PassDriver {
             repo,
             passes: Vec::new(),
             force: false,
+            save_remotes: false,
+            restore_remotes: false,
+            remote_refs: RemoteRefsPolicy::default(),
         })
+    }
+
+    /// Remote-data options (plan-remote-data.md): snapshot the allowlisted
+    /// remote config to the artifacts dir (`save`), re-add any keys the
+    /// run lost — normally none, config is untouched (R1) — and report
+    /// drift (`restore`), and apply a `refs/remotes/*` policy after import.
+    pub fn with_remote_data(
+        mut self,
+        save: bool,
+        restore: bool,
+        refs: RemoteRefsPolicy,
+    ) -> Self {
+        self.save_remotes = save;
+        self.restore_remotes = restore;
+        self.remote_refs = refs;
+        self
     }
 
     /// Set the pass sequence. Order is pipeline order (first named runs
@@ -296,6 +407,21 @@ impl PassDriver {
     }
 
     fn round(&mut self, import: bool) -> Result<RunReport, DriverError> {
+        // plan-remote-data.md: capture pre-rewrite remote state before
+        // anything mutates the repo. Read-only, so dry runs capture too
+        // (they report what a real run would save, but write nothing).
+        let want_capture = self.save_remotes || self.restore_remotes;
+        let captured = if want_capture {
+            Some(crate::remotes::capture(&self.repo)?)
+        } else {
+            None
+        };
+        let saved_refs = if self.remote_refs == RemoteRefsPolicy::Pin {
+            crate::remotes::capture_remote_refs(&self.repo)?
+        } else {
+            Vec::new()
+        };
+
         let input = crate::git::process::export_stream(&self.repo, &[])?;
         let mut out = transform_stream(&input, &self.passes)?;
 
@@ -310,7 +436,24 @@ impl PassDriver {
             commit_map: out.commit_map.clone(),
             ref_map: Vec::new(),
             artifacts_dir: None,
+            remotes: None,
         };
+
+        // Populate the capture side of the remotes summary (dry runs stop
+        // here — they write nothing and touch no refs).
+        if let Some(cap) = &captured {
+            let mut keys: alloc::collections::BTreeSet<&str> = alloc::collections::BTreeSet::new();
+            for (k, _) in &cap.state.entries {
+                keys.insert(k.as_str());
+            }
+            report.remotes = Some(RemotesSummary {
+                saved_keys: keys.len() as u64,
+                skipped: cap.skipped,
+                credential_keys: cap.credential_keys.clone(),
+                refs_policy: self.remote_refs,
+                ..RemotesSummary::default()
+            });
+        }
 
         if !import {
             return Ok(report);
@@ -345,8 +488,57 @@ impl PassDriver {
             })
             .collect();
 
+        // plan-remote-data.md: restore add-missing (config is untouched
+        // by the rewrite — R1 — so a nonzero restored count means an
+        // external actor raced the run), then apply the refs/remotes
+        // policy. Both after the ref-map snapshot so it records the
+        // state the passes produced.
+        if let Some(cap) = &captured {
+            if self.restore_remotes {
+                let rr = crate::remotes::restore(
+                    &self.repo,
+                    &cap.state,
+                    crate::remotes::RestoreMode::AddMissing,
+                )?;
+                let rem = report.remotes.as_mut().expect("set when captured");
+                rem.restored_keys = rr.keys_set;
+                rem.drift = rr.drift;
+            }
+        }
+        match self.remote_refs {
+            RemoteRefsPolicy::Rewrite => {}
+            RemoteRefsPolicy::Drop => {
+                let n = crate::remotes::drop_remote_refs(&self.repo)?;
+                report
+                    .remotes
+                    .get_or_insert_with(|| RemotesSummary {
+                        refs_policy: self.remote_refs,
+                        ..RemotesSummary::default()
+                    })
+                    .refs_affected = n;
+            }
+            RemoteRefsPolicy::Pin => {
+                let n = crate::remotes::pin_remote_refs(&self.repo, &saved_refs)?;
+                report
+                    .remotes
+                    .get_or_insert_with(|| RemotesSummary {
+                        refs_policy: self.remote_refs,
+                        ..RemotesSummary::default()
+                    })
+                    .refs_affected = n;
+            }
+        }
+
         // Artifacts (plan §4.3). Deterministic contents (A6).
         write_artifacts(&gfx_dir, &report)?;
+        // plan-remote-data.md D4: exact NUL-framed state + an audit-safe
+        // (userinfo-redacted) rendering.
+        if let Some(cap) = &captured {
+            if self.save_remotes {
+                std::fs::write(gfx_dir.join("remote-state.bin"), cap.state.serialize_z())?;
+                std::fs::write(gfx_dir.join("remote-state.txt"), cap.state.render_text())?;
+            }
+        }
         #[cfg(feature = "strip-blobs")]
         if let Some(sr) = out.strip_report.as_ref() {
             std::fs::write(gfx_dir.join("strip-report.txt"), sr.to_text())?;

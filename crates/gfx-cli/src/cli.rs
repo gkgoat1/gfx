@@ -22,6 +22,23 @@ pub fn global_args() -> Vec<ArgSpec> {
     vec![
         ArgSpec::value("repo", Some("."), "repository to rewrite"),
         ArgSpec::flag("force", "override the fresh-clone safety check"),
+        ArgSpec::flag(
+            "save-remotes",
+            "snapshot the repo's allowlisted remote data (URLs, fetch specs, branch \
+             tracking) to gfx/remote-state.{bin,txt} before rewriting (plan-remote-data.md)",
+        ),
+        ArgSpec::flag(
+            "restore-remotes",
+            "after the rewrite, re-add any remote-data keys that went missing and report \
+             drift (normally a no-op: the rewrite never touches config)",
+        ),
+        ArgSpec::value(
+            "remote-refs",
+            Some("rewrite"),
+            "refs/remotes/* policy after the rewrite: rewrite (default, status quo), \
+             drop (delete; next fetch repopulates), pin (restore pre-rewrite OIDs — \
+             keeps pre-rewrite objects reachable; hostile to redaction)",
+        ),
         ArgSpec::flag("dry-run", "export, run passes, report — no import, no ref changes"),
         ArgSpec::value(
             "passes",
@@ -153,9 +170,21 @@ fn try_run(
 
     let passes = resolve_passes_checked(&registry, &map)?;
 
+    let remote_refs = gfx::driver::RemoteRefsPolicy::parse(map.value("remote-refs").unwrap_or("rewrite"))
+        .ok_or_else(|| {
+            CliError::FlagConflict(format!(
+                "bad --remote-refs {:?} (want rewrite|drop|pin)",
+                map.value("remote-refs").unwrap_or("")
+            ))
+        })?;
     let mut driver = PassDriver::new(std::path::Path::new(map.value("repo").unwrap_or(".")))?
         .with_passes(passes)?
-        .force(map.flag("force"));
+        .force(map.flag("force"))
+        .with_remote_data(
+            map.flag("save-remotes"),
+            map.flag("restore-remotes"),
+            remote_refs,
+        );
 
     let report = if map.flag("dry-run") {
         driver.dry_run()?

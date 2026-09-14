@@ -775,3 +775,160 @@ fn strip_blobs_can_strip_a_synthetic_blob() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+// ---------------------------------------------------------------------------
+// Remote data across in-repo rewrites (plan-remote-data.md M3).
+
+/// A bare repo with remote config (URL, pushurl, branch tracking, an
+/// executable key) and a remote-tracking ref at the branch tip.
+fn mirror_like_repo(tag: &str, crlf: bool) -> (PathBuf, PathBuf) {
+    let base = tmpdir(tag);
+    let work = base.join("work");
+    let bare = base.join("bare.git");
+    std::fs::create_dir_all(&work).unwrap();
+    git(&base, &["init","-q","work"]);
+    let id = ["-c","user.email=t@t","-c","user.name=T"];
+    let content: &[u8] = if crlf { b"a\r\nb\r\n" } else { b"a\nb\n" };
+    std::fs::write(work.join("a.txt"), content).unwrap();
+    git(&work, &["add","."]);
+    git(&work, &[&id[..], &["commit","-qm","one"][..]].concat());
+    git(&base, &["clone","-q","--bare","work","bare.git"]);
+    let _ = std::fs::remove_dir_all(&work);
+
+    git(&bare, &["config","remote.origin.pushurl","ssh://git@example.com/org/r.git"]);
+    git(&bare, &["config","branch.main.remote","origin"]);
+    git(&bare, &["config","branch.main.merge","refs/heads/main"]);
+    git(&bare, &["config","credential.helper","store"]); // must not travel
+    let tip = git(&bare, &["rev-parse","refs/heads/main"]);
+    git(&bare, &["update-ref","refs/remotes/origin/main",String::from_utf8(tip).unwrap().trim()]);
+    (base, bare)
+}
+
+fn refs_under(repo: &Path, ns: &str) -> Vec<String> {
+    let out = git(repo, &["for-each-ref","--format=%(refname) %(objectname)",ns]);
+    String::from_utf8(out).unwrap().lines().map(str::to_string).collect()
+}
+
+#[test]
+fn remote_data_save_restore_and_artifacts() {
+    let (base, bare) = mirror_like_repo("rmt", false);
+    let expected = gfx::remotes::capture(&bare).unwrap().state;
+    assert!(expected.entries.len() >= 4, "url (from clone) + pushurl + 2 branch keys");
+
+    let mut d = PassDriver::new(&bare)
+        .unwrap()
+        .with_passes(vec![PassSpec::Remap(gfx_remap::RemapConfig::default())])
+        .unwrap()
+        .with_remote_data(true, true, gfx::driver::RemoteRefsPolicy::Rewrite);
+    let report = d.run().unwrap();
+
+    let rem = report.remotes.as_ref().expect("summary present");
+    assert!(rem.saved_keys >= 4, "saved: {:?}", rem);
+    assert_eq!(rem.skipped, 1, "credential.helper counted");
+    assert_eq!(rem.restored_keys, 0, "config untouched by the rewrite (R1)");
+    assert!(rem.drift.is_empty());
+    assert_eq!(rem.refs_affected, 0, "rewrite policy touches nothing");
+
+    // Artifacts: exact NUL-framed state + redacted human-readable render.
+    let dir = report.artifacts_dir.unwrap();
+    let bin = gfx::remotes::RemoteState::parse_z(&std::fs::read(dir.join("remote-state.bin")).unwrap()).unwrap();
+    assert_eq!(bin.entries, expected.entries, "snapshot is the exact pre-rewrite state");
+    let txt = std::fs::read_to_string(dir.join("remote-state.txt")).unwrap();
+    assert!(txt.contains("remote.origin.pushurl="), "{txt}");
+
+    // Config and refs survived as before (R1 + rewrite policy).
+    let live = gfx::remotes::capture(&bare).unwrap().state;
+    assert_eq!(live.entries, expected.entries);
+    assert_eq!(refs_under(&bare, "refs/remotes/").len(), 1);
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn remote_refs_drop_policy() {
+    let (base, bare) = mirror_like_repo("rmt", true); // crlf ⇒ real rewrite
+    let mut d = PassDriver::new(&bare)
+        .unwrap()
+        .with_passes(vec![
+            PassSpec::BlobXform(gfx::gfx_blob_xform::BlobXformConfig {
+                transforms: vec![gfx::gfx_blob_xform::SharedBlobTransform(
+                    std::sync::Arc::new(gfx::gfx_blob_xform::builtins::CrlfToLf),
+                )],
+                ..Default::default()
+            }),
+            PassSpec::Remap(gfx_remap::RemapConfig::default()),
+        ])
+        .unwrap()
+        .with_remote_data(false, false, gfx::driver::RemoteRefsPolicy::Drop);
+    let report = d.run().unwrap();
+
+    assert!(refs_under(&bare, "refs/remotes/").is_empty(), "dropped");
+    let rem = report.remotes.as_ref().expect("summary present for a policy");
+    assert_eq!(rem.refs_policy, gfx::driver::RemoteRefsPolicy::Drop);
+    assert_eq!(rem.refs_affected, 1);
+    gfx::git::process::fsck(&bare).expect("fsck --strict");
+    assert!(report.to_text().contains("remote-refs=drop:1"), "{}", report.to_text());
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn remote_refs_pin_policy_restores_pre_rewrite_oids() {
+    let (base, bare) = mirror_like_repo("rmt", true); // crlf ⇒ real rewrite
+    let pre = refs_under(&bare, "refs/remotes/");
+    assert_eq!(pre.len(), 1);
+    let old_oid = pre[0].split(' ').nth(1).unwrap().to_string();
+
+    let mut d = PassDriver::new(&bare)
+        .unwrap()
+        .with_passes(vec![
+            PassSpec::BlobXform(gfx::gfx_blob_xform::BlobXformConfig {
+                transforms: vec![gfx::gfx_blob_xform::SharedBlobTransform(
+                    std::sync::Arc::new(gfx::gfx_blob_xform::builtins::CrlfToLf),
+                )],
+                ..Default::default()
+            }),
+            PassSpec::Remap(gfx_remap::RemapConfig::default()),
+        ])
+        .unwrap()
+        .with_remote_data(false, false, gfx::driver::RemoteRefsPolicy::Pin);
+    let report = d.run().unwrap();
+
+    let post = refs_under(&bare, "refs/remotes/");
+    assert_eq!(post, pre, "pinned at pre-rewrite OIDs");
+    let rem = report.remotes.as_ref().unwrap();
+    assert_eq!(rem.refs_policy, gfx::driver::RemoteRefsPolicy::Pin);
+    assert_eq!(rem.refs_affected, 1);
+    // The pin keeps the pre-rewrite object reachable by design (R3/D6).
+    assert_eq!(git(&bare, &["cat-file","-t",&old_oid]), b"commit\n");
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn remote_data_credential_warning_and_redacted_render() {
+    let (base, bare) = mirror_like_repo("rmt", false);
+    git(&bare, &["config","remote.mirror.url","https://ci:sekret@example.com/r.git"]);
+
+    let mut d = PassDriver::new(&bare)
+        .unwrap()
+        .with_passes(vec![PassSpec::Remap(gfx_remap::RemapConfig::default())])
+        .unwrap()
+        .with_remote_data(true, false, gfx::driver::RemoteRefsPolicy::Rewrite);
+    let report = d.run().unwrap();
+
+    let rem = report.remotes.as_ref().unwrap();
+    assert_eq!(rem.credential_keys, vec!["remote.mirror.url"], "key named");
+    let text = report.to_text();
+    assert!(text.contains("remotes-warning:"), "{text}");
+    assert!(!text.contains("sekret"), "never echo the secret");
+    let dir = report.artifacts_dir.unwrap();
+    let txt = std::fs::read_to_string(dir.join("remote-state.txt")).unwrap();
+    assert!(txt.contains("remote.mirror.url=https://***@example.com/r.git"), "{txt}");
+    assert!(!txt.contains("sekret"), "{txt}");
+    // …but the exact bytes are in the .bin (restore needs them).
+    let bin = gfx::remotes::RemoteState::parse_z(&std::fs::read(dir.join("remote-state.bin")).unwrap()).unwrap();
+    assert_eq!(bin.get_all("remote.mirror.url"), vec!["https://ci:sekret@example.com/r.git"]);
+
+    let _ = std::fs::remove_dir_all(&base);
+}
