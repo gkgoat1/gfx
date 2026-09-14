@@ -38,5 +38,8 @@ pub mod git;
 #[cfg(feature = "git")]
 pub mod driver;
 
+#[cfg(feature = "git")]
+pub mod remotes;
+
 #[cfg(feature = "std")]
 pub use git::rewrite;
