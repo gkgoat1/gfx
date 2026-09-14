@@ -2,6 +2,7 @@
 resolver = "2"
 exclude = ["fuzz"]
 members = [
+    "crates/gfx-blob-xform",
     "crates/gfx-cli",
     "crates/gfx-pack",
     "crates/gfx-redact",
@@ -26,6 +27,7 @@ gfx-core = { path = "crates/gfx-core" }
 gfx = { path = "crates/gfx" }
 gfx-hash = { path = "crates/gfx-hash" }
 gfx-remap = { path = "crates/gfx-remap" }
+gfx-blob-xform = { path = "crates/gfx-blob-xform" }
 gfx-cli = { path = "crates/gfx-cli" }
 gfx-pack = { path = "crates/gfx-pack" }
 gfx-redact = { path = "crates/gfx-redact" }

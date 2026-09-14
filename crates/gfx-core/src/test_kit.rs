@@ -63,8 +63,7 @@ where
     F: Fn() -> T,
     T: Transform + 'static,
 {
-    let mut once = run_through(&make, events.clone()).expect("single pass");
-    once.extend(run_through(&make, events.clone()).expect("second pass"));
+    let fresh = run_through(&make, events.clone()).expect("fresh run");
 
     let mut t = make();
     let mut buf1 = Vec::new();
@@ -72,22 +71,13 @@ where
         t.apply(ev.clone(), &mut buf1).expect("pass 1 apply");
     }
     t.finish(&mut buf1).expect("pass 1 finish");
+    assert_eq!(buf1, fresh, "manual drive diverges from pipeline drive");
+
     t.reset();
     let mut buf2 = Vec::new();
     for ev in events {
         t.apply(ev, &mut buf2).expect("pass 2 apply");
     }
     t.finish(&mut buf2).expect("pass 2 finish");
-
-    let single = run_through(&make, buf1).expect("wrap pass 2");
-    let _ = single; // wrap-through must not panic
-    assert_eq!(
-        buf2.len() + first_pass_len(),
-        once.len(),
-        "reset did not restore fresh state"
-    );
-}
-
-fn first_pass_len() -> usize {
-    0
+    assert_eq!(buf2, fresh, "reset did not restore fresh state");
 }

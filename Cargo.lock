@@ -590,6 +590,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "gfx-blob-xform"
+version = "0.1.0"
+dependencies = [
+ "gfx-core",
+]
+
+[[package]]
 name = "gfx-cli"
 version = "0.1.0"
 dependencies = [
