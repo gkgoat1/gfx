@@ -363,6 +363,10 @@ impl PassFactory for BlobXformFactory {
                 "include-special-modes",
                 "also transform inline symlink/gitlink payloads (plan-blob-xform.md D5)",
             ),
+            ArgSpec::multi(
+                "cmd",
+                "chain: pipe each blob through this shell command (repeatable); non-zero exit retains the blob",
+            ),
         ]
     }
 
@@ -371,15 +375,21 @@ impl PassFactory for BlobXformFactory {
         fn shared<T: gfx::gfx_blob_xform::BlobTransform + 'static>(t: T) -> SharedBlobTransform {
             SharedBlobTransform(std::sync::Arc::new(t))
         }
-        // Chain order = argv order (plan §4.3).
+        let max_output = args.size("blob-xform.max-output-bytes")?;
+        // Chain order = argv order (plan §4.3); `--blob-xform.cmd` stages
+        // interleave with the built-ins exactly as given.
         let mut transforms: Vec<SharedBlobTransform> = Vec::new();
-        for key in args.ordered_keys() {
+        for (key, value) in args.ordered_entries() {
             let t = match key.as_str() {
                 "blob-xform.crlf-to-lf" => Some(shared(builtins::CrlfToLf)),
                 "blob-xform.trim-trailing-whitespace" => {
                     Some(shared(builtins::TrimTrailingWhitespace))
                 }
                 "blob-xform.ensure-final-newline" => Some(shared(builtins::EnsureFinalNewline)),
+                "blob-xform.cmd" => Some(shared(crate::cmd::CmdTransform {
+                    cmd: value.clone().expect("multi flag carries a value"),
+                    capture_limit: max_output.unwrap_or(crate::cmd::DEFAULT_CAPTURE_LIMIT),
+                })),
                 _ => None,
             };
             if let Some(t) = t {
@@ -396,7 +406,7 @@ impl PassFactory for BlobXformFactory {
         Ok(PassSpec::BlobXform(gfx::gfx_blob_xform::BlobXformConfig {
             transforms,
             skip_larger_than: args.size("blob-xform.skip-larger-than")?,
-            max_output_bytes: args.size("blob-xform.max-output-bytes")?,
+            max_output_bytes: max_output,
             include_inline: true,
             include_special_modes: args.flag("blob-xform.include-special-modes"),
         }))

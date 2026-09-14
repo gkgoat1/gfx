@@ -100,10 +100,11 @@ pub struct CliArg {
 pub struct ArgMap {
     values: BTreeMap<String, Vec<String>>,
     present: std::collections::BTreeSet<String>,
-    /// Every explicitly-given key, in the order given (repeats included;
-    /// config-file entries append after argv entries). Passes whose flags
-    /// are order-sensitive (blob-xform's transform chain) read this.
-    order: Vec<String>,
+    /// Every explicitly-given flag, in the order given (repeats included;
+    /// config-file entries append after argv entries). The value is `Some`
+    /// for value/size/multi flags, `None` for boolean flags. Passes whose
+    /// flags are order-sensitive (blob-xform's transform chain) read this.
+    order: Vec<(String, Option<String>)>,
 }
 
 impl ArgMap {
@@ -143,19 +144,24 @@ impl ArgMap {
     }
 
     /// Explicitly-given keys, in the order given (repeats included).
-    pub fn ordered_keys(&self) -> &[String] {
+    pub fn ordered_keys(&self) -> impl Iterator<Item = &str> {
+        self.order.iter().map(|(k, _)| k.as_str())
+    }
+
+    /// Explicitly-given flags with values, in the order given.
+    pub fn ordered_entries(&self) -> &[(String, Option<String>)] {
         &self.order
     }
 
     pub(crate) fn put(&mut self, key: &str, value: String) {
-        self.values.entry(key.to_string()).or_default().push(value);
+        self.values.entry(key.to_string()).or_default().push(value.clone());
         self.present.insert(key.to_string());
-        self.order.push(key.to_string());
+        self.order.push((key.to_string(), Some(value)));
     }
 
     pub(crate) fn mark_present(&mut self, key: &str) {
         self.present.insert(key.to_string());
-        self.order.push(key.to_string());
+        self.order.push((key.to_string(), None));
     }
 }
 

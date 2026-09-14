@@ -168,6 +168,7 @@ usual (remap owns that bookkeeping).
 | `--blob-xform.skip-larger-than <size>` | leave blobs larger than this alone (counted as retained-guard) |
 | `--blob-xform.max-output-bytes <size>` | discard a chain result larger than this; retain the original |
 | `--blob-xform.include-special-modes` | also transform inline symlink/gitlink payloads (skipped by default) |
+| `--blob-xform.cmd <shell>` | chain stage: pipe each blob through this shell command (repeatable) — stdin is the blob, stdout the replacement; non-zero exit (or capture overrun) retains the original. **The command is the purity contract**: gfx cannot enforce that it is deterministic. stderr is swallowed; no per-blob timeout in v1 |
 
 - **Chain order is argv order**:
   `--blob-xform.crlf-to-lf --blob-xform.trim-trailing-whitespace` runs the
@@ -276,9 +277,9 @@ way (`examples/strip-blobs.rs`, `examples/remap.rs`).
   pre-sharing checklist above.
 - `--redact.map` rows cannot express non-UTF-8 ident bytes (TOML
   limitation); use an injected `IdentPolicy` from host code.
-- blob-xform's external-command adapter (`--blob-xform.cmd`) is not
-  implemented yet (plan-blob-xform.md M2); custom transforms today are
-  host-injected via the library API.
+- blob-xform's `--blob-xform.cmd` runs `sh -c` per blob with a bounded
+  stdout capture (64 MiB unless `--blob-xform.max-output-bytes` says less);
+  no per-blob timeout — a hung command hangs the run.
 
 - Buffered rounds: the export stream and event list live in memory.
 - Empty branches (refs with no commits) are dropped by the round-trip.
