@@ -169,6 +169,9 @@ usual (remap owns that bookkeeping).
 | `--blob-xform.max-output-bytes <size>` | discard a chain result larger than this; retain the original |
 | `--blob-xform.include-special-modes` | also transform inline symlink/gitlink payloads (skipped by default) |
 | `--blob-xform.cmd <shell>` | chain stage: pipe each blob through this shell command (repeatable) — stdin is the blob, stdout the replacement; non-zero exit (or capture overrun) retains the original. **The command is the purity contract**: gfx cannot enforce that it is deterministic. stderr is swallowed; no per-blob timeout in v1 |
+| `--blob-xform.ext.<EXT>.cmd <shell>` | **path rule** (plan-blob-xform-paths.md): transform blobs used at `*.<EXT>` paths through this command (repeatable; `<EXT>` is `[A-Za-z0-9]+`). The transformed blob is created once per source blob and reused by every later matching use; other paths keep the original bytes |
+| `--blob-xform.ext.<EXT>.crlf-to-lf` / `.trim-trailing-whitespace` / `.ensure-final-newline` | builtin chain stages for the `*.<EXT>` rule |
+| `--blob-xform.ext.<EXT>.skip-larger-than <size>` / `.max-output-bytes <size>` | per-rule size guards |
 
 - **Chain order is argv order**:
   `--blob-xform.crlf-to-lf --blob-xform.trim-trailing-whitespace` runs the
@@ -184,6 +187,12 @@ usual (remap owns that bookkeeping).
   `crlf-to-lf` apply to *every* blob, binaries included. If a blob must
   not be touched, gate it with `--blob-xform.skip-larger-than` or keep
   binary history out of scope.
+- **Path rules act at the file site, not the blob:** a blob referenced as
+  both `lib.rs` and `notes.txt` is transformed only for the `.rs` uses —
+  path rules are mode-aware and path-aware by construction (the symlink
+  hazard below applies only to whole-blob transforms). Transformed blobs
+  are synthetic stream events created at first matching use; marks are
+  allocated above the stream maximum by the driver.
 - **Symlink hazard (plan-blob-xform.md D5):** a symlink's target path is
   stored as blob bytes, and standalone blobs arrive before the commits
   that reference them, so the pass cannot know a blob is a symlink target.

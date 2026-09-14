@@ -2,10 +2,10 @@
 
 | Field    | Value |
 |----------|-------|
-| Status   | Research complete; design ready for implementation |
+| Status   | Implemented (M0–M1; M2 pack/fuzz next) |
 | Scope    | extend `gfx-blob-xform` with path rules: transform a blob only when it is used at a path matching a rule (e.g. `rustfmt` every `*.rs`), caching the result and creating the transformed blob once, at its first matching use |
 | Depends  | [plan-blob-xform.md](plan-blob-xform.md) (implemented M0–M3: fallible-transform core, D1 retention, cmd adapter, driver stage); plan-multistream-pack.md D3 (pre-scan precedent) |
-| Updated  | 2026-09-13 |
+| Updated  | 2026-09-13 (M0 pass machinery + M1 driver/CLI; see [rewrite-cli.md](rewrite-cli.md)) |
 
 ## 1. Summary
 

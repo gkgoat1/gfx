@@ -162,3 +162,74 @@ fn cmd_transform_end_to_end_uppercase() {
 
     let _ = std::fs::remove_dir_all(&base);
 }
+
+// ---------------------------------------------------------------------------
+// Path rules with a real filter program (plan-blob-xform-paths.md §6 E2E).
+
+#[test]
+fn cmd_path_rule_end_to_end() {
+    let base = tmpdir("ext-e2e");
+    let work = base.join("work");
+    let bare = base.join("bare.git");
+    std::fs::create_dir_all(&work).unwrap();
+    git(&base, &["init", "-q", "work"]);
+    let id = ["-c", "user.email=t@t", "-c", "user.name=T"];
+    std::fs::write(work.join("lib.rs"), b"fn a() {}\n").unwrap();
+    std::fs::write(work.join("notes.txt"), b"fn a() {}\n").unwrap(); // same content, other ext
+    git(&work, &["add", "."]);
+    git(&work, &[&id[..], &["commit", "-qm", "code + notes"][..]].concat());
+    git(&base, &["clone", "-q", "--bare", "work", "bare.git"]);
+    let _ = std::fs::remove_dir_all(&work);
+
+    let cfg = BlobXformConfig {
+        path_rules: vec![gfx::gfx_blob_xform::PathRule {
+            extension: b"rs".to_vec(),
+            transforms: vec![SharedBlobTransform(std::sync::Arc::new(CmdTransform {
+                cmd: "tr a-z A-Z".into(),
+                capture_limit: DEFAULT_CAPTURE_LIMIT,
+            }))],
+            skip_larger_than: None,
+            max_output_bytes: None,
+        }],
+        ..BlobXformConfig::default()
+    };
+    let mut d = PassDriver::new(&bare)
+        .unwrap()
+        .with_passes(vec![
+            PassSpec::BlobXform(cfg),
+            PassSpec::Remap(gfx::gfx_remap::RemapConfig::default()),
+        ])
+        .unwrap();
+    let report = d.run().unwrap();
+
+    gfx::git::process::fsck(&bare).expect("fsck --strict");
+    assert_eq!(git(&bare, &["show", "HEAD:lib.rs"]), b"FN A() {}\n");
+    assert_eq!(git(&bare, &["show", "HEAD:notes.txt"]), b"fn a() {}\n", "same blob, non-matching ext ⇒ original");
+    let detail = &report.passes[0].detail;
+    assert!(detail.contains("rule[rs]:"), "{detail}");
+    assert!(detail.contains("created=1"), "{detail}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn factory_builds_path_rule_cmd_stages() {
+    let reg = PassRegistry::new(vec![blob_xform_factory()]).unwrap();
+    let specs = reg.all_args(&gfx_cli::cli::global_args());
+    let argv: Vec<std::ffi::OsString> = [
+        "--passes", "blob-xform",
+        "--blob-xform.ext.rs.cmd", "rustfmt --emit stdout",
+    ]
+    .iter()
+    .map(std::ffi::OsString::from)
+    .collect();
+    let map = parse_argv(&specs, &argv).unwrap();
+    let passes = reg.resolve("blob-xform", &map).unwrap();
+    match &passes[0] {
+        PassSpec::BlobXform(cfg) => {
+            assert_eq!(cfg.path_rules.len(), 1);
+            assert_eq!(cfg.path_rules[0].extension, b"rs");
+            assert_eq!(cfg.path_rules[0].transforms[0].0.describe(), "cmd:\"rustfmt --emit stdout\"");
+        }
+        other => panic!("{other:?}"),
+    }
+}

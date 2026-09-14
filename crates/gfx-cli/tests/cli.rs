@@ -571,3 +571,106 @@ fn blob_xform_is_registered_but_never_default() {
     assert!(!reg.default_spec().contains("blob-xform"), "opt-in only");
     assert!(reg.names().contains(&"blob-xform"), "discoverable");
 }
+
+// ---------------------------------------------------------------------------
+// Path rules (plan-blob-xform-paths.md §5.3): dynamic ext keys.
+
+#[test]
+fn path_rule_factory_assembles_rules_in_argv_order() {
+    let reg = blob_xform_registry();
+    let specs = reg.all_args(&gfx_cli::cli::global_args());
+    let argv: Vec<std::ffi::OsString> = [
+        "--passes", "blob-xform",
+        "--blob-xform.ext.rs.cmd", "rustfmt --emit stdout",
+        "--blob-xform.ext.rs.ensure-final-newline",
+        "--blob-xform.ext.py.cmd", "black -",
+        "--blob-xform.ext.rs.skip-larger-than", "1M",
+    ]
+    .iter()
+    .map(std::ffi::OsString::from)
+    .collect();
+    let map = parse_argv(&specs, &argv).unwrap();
+    let passes = reg.resolve("blob-xform", &map).unwrap();
+    match &passes[0] {
+        PassSpec::BlobXform(cfg) => {
+            assert_eq!(cfg.path_rules.len(), 2);
+            let rs = &cfg.path_rules[0];
+            assert_eq!(rs.extension, b"rs");
+            let stages: Vec<String> = rs.transforms.iter().map(|t| t.0.describe()).collect();
+            assert_eq!(
+                stages,
+                ["cmd:\"rustfmt --emit stdout\"", "ensure-final-newline"],
+                "per-extension chain follows argv order"
+            );
+            assert_eq!(rs.skip_larger_than, Some(1024 * 1024));
+            let py = &cfg.path_rules[1];
+            assert_eq!(py.extension, b"py");
+            assert_eq!(py.skip_larger_than, None, "guards are per-extension");
+            assert_eq!(py.transforms.len(), 1);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn path_rule_guards_without_stages_are_a_usage_error() {
+    let reg = blob_xform_registry();
+    let specs = reg.all_args(&gfx_cli::cli::global_args());
+    let argv: Vec<std::ffi::OsString> =
+        ["--passes", "blob-xform", "--blob-xform.ext.rs.skip-larger-than", "1M"]
+            .iter()
+            .map(std::ffi::OsString::from)
+            .collect();
+    let map = parse_argv(&specs, &argv).unwrap();
+    let err = reg.resolve("blob-xform", &map).unwrap_err();
+    match err {
+        gfx_cli::CliError::FlagConflict(msg) => {
+            assert!(msg.contains("ext.rs"), "{msg}");
+            assert!(msg.contains("no transform stages"), "{msg}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn path_rule_flags_without_the_pass_are_rejected() {
+    let reg = blob_xform_registry();
+    let specs = reg.all_args(&gfx_cli::cli::global_args());
+    let argv: Vec<std::ffi::OsString> =
+        ["--blob-xform.ext.rs.cmd", "rustfmt"].iter().map(std::ffi::OsString::from).collect();
+    let map = parse_argv(&specs, &argv).unwrap();
+    let err = gfx_cli::cli::resolve_passes_checked(&reg, &map).unwrap_err();
+    match err {
+        gfx_cli::CliError::FlagConflict(msg) => {
+            assert!(msg.contains("blob-xform.ext.rs.cmd"), "{msg}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn path_rule_alone_satisfies_the_nothing_to_do_check() {
+    let reg = blob_xform_registry();
+    let specs = reg.all_args(&gfx_cli::cli::global_args());
+    let argv: Vec<std::ffi::OsString> =
+        ["--passes", "blob-xform", "--blob-xform.ext.rs.cmd", "cat"]
+            .iter()
+            .map(std::ffi::OsString::from)
+            .collect();
+    let map = parse_argv(&specs, &argv).unwrap();
+    reg.resolve("blob-xform", &map).expect("a path rule is something to do");
+}
+
+#[test]
+fn dynamic_keys_validate_the_extension_charset() {
+    let reg = blob_xform_registry();
+    let specs = reg.all_args(&gfx_cli::cli::global_args());
+    for bad in ["--blob-xform.ext..cmd", "--blob-xform.ext.r-s.cmd", "--blob-xform.ext.r/s.cmd"] {
+        let argv: Vec<std::ffi::OsString> =
+            [bad, "cat"].iter().map(std::ffi::OsString::from).collect();
+        assert!(
+            matches!(parse_argv(&specs, &argv), Err(gfx_cli::CliError::UnknownFlag { .. })),
+            "{bad} must not parse as a dynamic key"
+        );
+    }
+}

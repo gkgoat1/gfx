@@ -367,6 +367,17 @@ impl PassFactory for BlobXformFactory {
                 "cmd",
                 "chain: pipe each blob through this shell command (repeatable); non-zero exit retains the blob",
             ),
+            // Path rules (plan-blob-xform-paths.md §5.3): dynamic keys —
+            // <ext> is the literal extension ([A-Za-z0-9]+).
+            ArgSpec::dynamic_multi(
+                "ext.<ext>.cmd",
+                "path rule: pipe blobs used at *.<ext> paths through this shell command (repeatable)",
+            ),
+            ArgSpec::dynamic_flag("ext.<ext>.crlf-to-lf", "path rule chain stage for *.<ext>"),
+            ArgSpec::dynamic_flag("ext.<ext>.trim-trailing-whitespace", "path rule chain stage for *.<ext>"),
+            ArgSpec::dynamic_flag("ext.<ext>.ensure-final-newline", "path rule chain stage for *.<ext>"),
+            ArgSpec::dynamic_size("ext.<ext>.skip-larger-than", "path rule guard for *.<ext>"),
+            ArgSpec::dynamic_size("ext.<ext>.max-output-bytes", "path rule output bound for *.<ext>"),
         ]
     }
 
@@ -377,8 +388,19 @@ impl PassFactory for BlobXformFactory {
         }
         let max_output = args.size("blob-xform.max-output-bytes")?;
         // Chain order = argv order (plan §4.3); `--blob-xform.cmd` stages
-        // interleave with the built-ins exactly as given.
+        // interleave with the built-ins exactly as given. Path-rule
+        // stages group by extension, each extension's chain in argv order
+        // (plan-blob-xform-paths.md §5.3).
         let mut transforms: Vec<SharedBlobTransform> = Vec::new();
+        let mut rule_exts: Vec<String> = Vec::new(); // first-seen order
+        let mut rule_stages: std::collections::BTreeMap<String, Vec<SharedBlobTransform>> =
+            std::collections::BTreeMap::new();
+        let push_rule_stage = |ext: &str, t: SharedBlobTransform, rule_exts: &mut Vec<String>, rule_stages: &mut std::collections::BTreeMap<String, Vec<SharedBlobTransform>>| {
+            if !rule_stages.contains_key(ext) {
+                rule_exts.push(ext.to_string());
+            }
+            rule_stages.entry(ext.to_string()).or_default().push(t);
+        };
         for (key, value) in args.ordered_entries() {
             let t = match key.as_str() {
                 "blob-xform.crlf-to-lf" => Some(shared(builtins::CrlfToLf)),
@@ -394,12 +416,55 @@ impl PassFactory for BlobXformFactory {
             };
             if let Some(t) = t {
                 transforms.push(t);
+                continue;
+            }
+            if let Some(rest) = key.strip_prefix("blob-xform.ext.") {
+                let (ext, sub) = rest.rsplit_once('.').expect("dynamic key has ext and sub-key");
+                let rule_max = args
+                    .size(&format!("blob-xform.ext.{ext}.max-output-bytes"))?
+                    .or(max_output);
+                match sub {
+                    "cmd" => push_rule_stage(ext, shared(crate::cmd::CmdTransform {
+                        cmd: value.clone().expect("multi flag carries a value"),
+                        capture_limit: rule_max.unwrap_or(crate::cmd::DEFAULT_CAPTURE_LIMIT),
+                    }), &mut rule_exts, &mut rule_stages),
+                    "crlf-to-lf" => push_rule_stage(ext, shared(builtins::CrlfToLf), &mut rule_exts, &mut rule_stages),
+                    "trim-trailing-whitespace" => push_rule_stage(ext, shared(builtins::TrimTrailingWhitespace), &mut rule_exts, &mut rule_stages),
+                    "ensure-final-newline" => push_rule_stage(ext, shared(builtins::EnsureFinalNewline), &mut rule_exts, &mut rule_stages),
+                    "skip-larger-than" | "max-output-bytes" => {
+                        if !rule_stages.contains_key(ext) && !rule_exts.contains(&ext.to_string()) {
+                            rule_exts.push(ext.to_string());
+                        }
+                    }
+                    other => {
+                        return Err(CliError::UnknownFlag {
+                            flag: format!("blob-xform.ext.{ext}.{other}"),
+                            available: vec![],
+                        })
+                    }
+                }
             }
         }
-        if transforms.is_empty() {
+        let mut path_rules: Vec<gfx::gfx_blob_xform::PathRule> = Vec::new();
+        for ext in &rule_exts {
+            let stages = rule_stages.remove(ext).unwrap_or_default();
+            if stages.is_empty() {
+                return Err(CliError::FlagConflict(format!(
+                    "--blob-xform.ext.{ext}.* declares guards but no transform stages;                      a path rule needs at least one stage (e.g. --blob-xform.ext.{ext}.cmd)"
+                )));
+            }
+            path_rules.push(gfx::gfx_blob_xform::PathRule {
+                extension: ext.as_bytes().to_vec(),
+                transforms: stages,
+                skip_larger_than: args.size(&format!("blob-xform.ext.{ext}.skip-larger-than"))?,
+                max_output_bytes: args.size(&format!("blob-xform.ext.{ext}.max-output-bytes"))?,
+            });
+        }
+        if transforms.is_empty() && path_rules.is_empty() {
             return Err(CliError::FlagConflict(
                 "blob-xform needs at least one transform flag \
-                 (e.g. --blob-xform.crlf-to-lf); nothing to do otherwise"
+                 (e.g. --blob-xform.crlf-to-lf or --blob-xform.ext.rs.cmd …); \
+                 nothing to do otherwise"
                     .into(),
             ));
         }
@@ -409,6 +474,7 @@ impl PassFactory for BlobXformFactory {
             max_output_bytes: max_output,
             include_inline: true,
             include_special_modes: args.flag("blob-xform.include-special-modes"),
+            path_rules,
             ..Default::default()
         }))
     }

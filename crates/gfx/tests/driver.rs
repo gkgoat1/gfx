@@ -573,3 +573,145 @@ fn blob_xform_crlf_end_to_end() {
     let log = String::from_utf8(git(&bare, &["log","--format=%s"])).unwrap();
     assert!(log.contains("binary") && log.contains("crlf text"));
 }
+
+#[test]
+fn blob_xform_path_rules_end_to_end() {
+    // plan-blob-xform-paths.md §6 driver test: a blob used at both .rs
+    // and .txt paths; the .rs uses get the transformed blob (created
+    // once), the .txt use keeps the original; every commit referencing a
+    // synthetic is flagged rewritten, fsck clean.
+    let base = tmpdir("bxp");
+    let work = base.join("work");
+    let bare = base.join("bare.git");
+    std::fs::create_dir_all(&work).unwrap();
+    git(&base, &["init","-q","work"]);
+    let id = ["-c","user.email=t@t","-c","user.name=T"];
+    // Root commit has no .rs content at all: it must survive untouched.
+    std::fs::write(work.join("b.txt"), b"plain\n").unwrap();
+    git(&work, &["add","."]);
+    git(&work, &[&id[..], &["commit","-qm","txt root"][..]].concat());
+    std::fs::write(work.join("a.rs"), b"fn main() {}\n").unwrap();
+    git(&work, &["add","."]);
+    git(&work, &[&id[..], &["commit","-qm","rs file"][..]].concat());
+    // Same blob content at a .txt path: shares the .rs blob.
+    std::fs::write(work.join("copy.txt"), b"fn main() {}\n").unwrap();
+    git(&work, &["add","."]);
+    git(&work, &[&id[..], &["commit","-qm","same blob, txt path"][..]].concat());
+    git(&base, &["clone","-q","--bare","work","bare.git"]);
+    let _ = std::fs::remove_dir_all(&work);
+
+    let c1 = String::from_utf8(git(&bare, &["rev-parse","HEAD~2"])).unwrap();
+    let c2 = String::from_utf8(git(&bare, &["rev-parse","HEAD~1"])).unwrap();
+    let c3 = String::from_utf8(git(&bare, &["rev-parse","HEAD"])).unwrap();
+
+    use gfx::gfx_blob_xform::{BlobXformConfig, PathRule, SharedBlobTransform};
+    let upper = SharedBlobTransform(std::sync::Arc::new(
+        |blob: &[u8]| -> Result<Vec<u8>, ()> { Ok(blob.iter().map(u8::to_ascii_uppercase).collect()) },
+    ));
+    let mut d = PassDriver::new(&bare)
+        .unwrap()
+        .with_passes(vec![
+            PassSpec::BlobXform(BlobXformConfig {
+                path_rules: vec![PathRule {
+                    extension: b"rs".to_vec(),
+                    transforms: vec![upper],
+                    skip_larger_than: None,
+                    max_output_bytes: None,
+                }],
+                ..BlobXformConfig::default()
+            }),
+            PassSpec::Remap(gfx_remap::RemapConfig::default()),
+        ])
+        .unwrap();
+    let report = d.run().unwrap();
+
+    gfx::git::process::fsck(&bare).expect("fsck --strict");
+    // .rs path transformed at every commit it appears in…
+    assert_eq!(git(&bare, &["show","HEAD:a.rs"]), b"FN MAIN() {}\n");
+    assert_eq!(git(&bare, &["show","HEAD~1:a.rs"]), b"FN MAIN() {}\n");
+    // …the same blob at a .txt path is the ORIGINAL bytes.
+    assert_eq!(git(&bare, &["show","HEAD:copy.txt"]), b"fn main() {}\n");
+    assert_eq!(git(&bare, &["show","HEAD:b.txt"]), b"plain\n");
+
+    // Rewrite detection: c2 (introduces a.rs) and c3 (descendant) rewrote;
+    // c1 (txt-only root, no matching op, no rewritten parent) keeps its
+    // hash. Descendants of a rewrite always rewrite — the parent hash is
+    // part of commit identity.
+    let map = report.commit_map.expect("remap ran");
+    let lookup = |old: &str| -> String {
+        let (_old_oid, new) = map
+            .iter()
+            .find(|(o, _)| o.to_hex().to_string() == old.trim())
+            .expect("commit in map");
+        new.expect("finalized").to_hex().to_string()
+    };
+    assert_eq!(lookup(&c1), c1.trim(), "c1 untouched by the rule");
+    assert_ne!(lookup(&c2), c2.trim(), "c2 references the synthetic");
+    assert_ne!(lookup(&c3), c3.trim(), "c3 descends from a rewrite");
+
+    // Report: per-rule counters — a.rs is added once (c2); copy.txt's add
+    // is a txt path (no match). Exactly 1 op examined, 1 synthetic.
+    let detail = &report.passes[0].detail;
+    assert!(detail.contains("rule[rs]:"), "{detail}");
+    assert!(detail.contains("ops=1"), "{detail}");
+    assert!(detail.contains("rewritten=1"), "{detail}");
+    assert!(detail.contains("created=1"), "{detail}");
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn blob_xform_path_rules_created_once_across_many_uses() {
+    // A .rs blob modified in a second commit: both the old and new blob
+    // get exactly one synthetic each, and every later commit reuses them.
+    let base = tmpdir("bxp2");
+    let work = base.join("work");
+    let bare = base.join("bare.git");
+    std::fs::create_dir_all(&work).unwrap();
+    git(&base, &["init","-q","work"]);
+    let id = ["-c","user.email=t@t","-c","user.name=T"];
+    std::fs::write(work.join("lib.rs"), b"fn a() {}\n").unwrap();
+    git(&work, &["add","."]);
+    git(&work, &[&id[..], &["commit","-qm","v1"][..]].concat());
+    std::fs::write(work.join("lib.rs"), b"fn a() {}\nfn b() {}\n").unwrap();
+    git(&work, &["add","."]);
+    git(&work, &[&id[..], &["commit","-qm","v2"][..]].concat());
+    std::fs::write(work.join("readme.md"), b"docs\n").unwrap();
+    git(&work, &["add","."]);
+    git(&work, &[&id[..], &["commit","-qm","docs"][..]].concat());
+    git(&base, &["clone","-q","--bare","work","bare.git"]);
+    let _ = std::fs::remove_dir_all(&work);
+
+    use gfx::gfx_blob_xform::{BlobXformConfig, PathRule, SharedBlobTransform};
+    let upper = SharedBlobTransform(std::sync::Arc::new(
+        |blob: &[u8]| -> Result<Vec<u8>, ()> { Ok(blob.iter().map(u8::to_ascii_uppercase).collect()) },
+    ));
+    let mut d = PassDriver::new(&bare)
+        .unwrap()
+        .with_passes(vec![
+            PassSpec::BlobXform(BlobXformConfig {
+                path_rules: vec![PathRule {
+                    extension: b"rs".to_vec(),
+                    transforms: vec![upper],
+                    skip_larger_than: None,
+                    max_output_bytes: None,
+                }],
+                ..BlobXformConfig::default()
+            }),
+            PassSpec::Remap(gfx_remap::RemapConfig::default()),
+        ])
+        .unwrap();
+    let report = d.run().unwrap();
+
+    gfx::git::process::fsck(&bare).expect("fsck --strict");
+    assert_eq!(git(&bare, &["show","HEAD~2:lib.rs"]), b"FN A() {}\n");
+    assert_eq!(git(&bare, &["show","HEAD~1:lib.rs"]), b"FN A() {}\nFN B() {}\n");
+    assert_eq!(git(&bare, &["show","HEAD:lib.rs"]), b"FN A() {}\nFN B() {}\n");
+    assert_eq!(git(&bare, &["show","HEAD:readme.md"]), b"docs\n");
+    let detail = &report.passes[0].detail;
+    // Two distinct .rs blobs, one op each → 2 synthetics.
+    assert!(detail.contains("ops=2"), "{detail}");
+    assert!(detail.contains("created=2"), "{detail}");
+
+    let _ = std::fs::remove_dir_all(&base);
+}

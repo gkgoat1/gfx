@@ -47,6 +47,12 @@ pub struct ArgSpec {
     /// Default (canonical string form) used when absent.
     pub default: Option<&'static str>,
     pub help: &'static str,
+    /// Dynamic-key spec: `flag` contains exactly one `<ext>` placeholder
+    /// and matches any concrete flag whose placeholder segment is
+    /// `[A-Za-z0-9]+` (e.g. `ext.<ext>.cmd` matches `ext.rs.cmd`). The
+    /// ArgMap records the *concrete* key. Used by blob-xform path rules
+    /// (plan-blob-xform-paths.md §5.3).
+    pub dynamic: bool,
 }
 
 impl ArgSpec {
@@ -56,7 +62,26 @@ impl ArgSpec {
             kind: ArgKind::Flag,
             default: None,
             help,
+            dynamic: false,
         }
+    }
+
+    /// Dynamic-key boolean flag: `flag` must contain one `<ext>`.
+    pub fn dynamic_flag(flag: &'static str, help: &'static str) -> Self {
+        assert!(flag.matches("<ext>").count() == 1, "dynamic flag needs one <ext>");
+        ArgSpec { kind: ArgKind::Flag, dynamic: true, ..Self::flag(flag, help) }
+    }
+
+    /// Dynamic-key repeatable value flag.
+    pub fn dynamic_multi(flag: &'static str, help: &'static str) -> Self {
+        assert!(flag.matches("<ext>").count() == 1, "dynamic flag needs one <ext>");
+        ArgSpec { kind: ArgKind::Multi, dynamic: true, ..Self::flag(flag, help) }
+    }
+
+    /// Dynamic-key size flag.
+    pub fn dynamic_size(flag: &'static str, help: &'static str) -> Self {
+        assert!(flag.matches("<ext>").count() == 1, "dynamic flag needs one <ext>");
+        ArgSpec { kind: ArgKind::Size, dynamic: true, ..Self::flag(flag, help) }
     }
 
     pub fn value(flag: &'static str, default: Option<&'static str>, help: &'static str) -> Self {
@@ -65,6 +90,7 @@ impl ArgSpec {
             kind: ArgKind::Value,
             default,
             help,
+            dynamic: false,
         }
     }
 
@@ -74,6 +100,7 @@ impl ArgSpec {
             kind: ArgKind::Multi,
             default: None,
             help,
+            dynamic: false,
         }
     }
 
@@ -83,6 +110,7 @@ impl ArgSpec {
             kind: ArgKind::Size,
             default,
             help,
+            dynamic: false,
         }
     }
 }
@@ -218,24 +246,46 @@ pub fn parse_size(s: &str) -> Option<u64> {
 
 /// Resolution rule for a `--flag` token: exact key match first, then a flat
 /// name that exactly one namespaced spec claims.
-fn resolve<'a>(specs: &'a [CliArg], name: &str) -> Result<&'a CliArg, CliError> {
+/// The outcome of resolving a flag name: the matched spec plus the key
+/// to record in the ArgMap (the *concrete* key for dynamic specs).
+struct Resolved<'a> {
+    spec: &'a ArgSpec,
+    key: String,
+}
+
+fn resolve<'a>(specs: &'a [CliArg], name: &str) -> Result<Resolved<'a>, CliError> {
     if let Some(arg) = specs.iter().find(|a| a.key == name) {
-        return Ok(arg);
+        return Ok(Resolved { spec: &arg.spec, key: arg.key.clone() });
     }
     let matches: Vec<&CliArg> = specs
         .iter()
-        .filter(|a| a.key.contains('.') && a.key.rsplit('.').next() == Some(name))
+        .filter(|a| !a.spec.dynamic && a.key.contains('.') && a.key.rsplit('.').next() == Some(name))
         .collect();
     match matches.as_slice() {
-        [one] => Ok(one),
-        [] => Err(CliError::UnknownFlag {
-            flag: name.to_string(),
-            available: specs.iter().map(|a| a.key.clone()).collect(),
-        }),
-        _ => Err(CliError::AmbiguousFlag {
-            flag: name.to_string(),
-        }),
+        [one] => return Ok(Resolved { spec: &one.spec, key: one.key.clone() }),
+        [_one, ..] => return Err(CliError::AmbiguousFlag { flag: name.to_string() }),
+        [] => {}
     }
+    // Dynamic specs: `blob-xform.ext.<ext>.cmd` matches
+    // `blob-xform.ext.rs.cmd` when the placeholder segment is [A-Za-z0-9]+.
+    for arg in specs {
+        if !arg.spec.dynamic {
+            continue;
+        }
+        let Some((pre, post)) = arg.key.split_once("<ext>") else { continue };
+        let Some(middle) = name.strip_prefix(pre).and_then(|r| r.strip_suffix(post)) else {
+            continue;
+        };
+        if !middle.is_empty()
+            && middle.bytes().all(|b| b.is_ascii_alphanumeric())
+        {
+            return Ok(Resolved { spec: &arg.spec, key: name.to_string() });
+        }
+    }
+    Err(CliError::UnknownFlag {
+        flag: name.to_string(),
+        available: specs.iter().map(|a| a.key.clone()).collect(),
+    })
 }
 
 /// Parse `argv` (no program name) against the declared specs. Defaults are

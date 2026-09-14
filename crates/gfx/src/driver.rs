@@ -391,6 +391,9 @@ pub struct TransformOutcome {
     pub redact_report: Option<gfx_redact::RedactReport>,
     #[cfg(feature = "blob-xform")]
     pub blob_xform_report: Option<gfx_blob_xform::BlobXformReport>,
+    /// Path rules the report's per-rule counters correspond to (D9).
+    #[cfg(feature = "blob-xform")]
+    pub blob_xform_rules: Vec<gfx_blob_xform::PathRule>,
 }
 
 /// Parse `input` and run `passes` over it in pipeline order. Assumes the
@@ -410,7 +413,7 @@ pub fn transform_stream(
     #[cfg(feature = "redact")]
     let mut redact: Option<gfx_redact::Redact> = None;
     #[cfg(feature = "blob-xform")]
-    let mut blob_xform: Option<gfx_blob_xform::BlobXform> = None;
+    let mut blob_xform_cfg: Option<gfx_blob_xform::BlobXformConfig> = None;
     for p in passes {
         match p {
             #[cfg(feature = "remap")]
@@ -423,7 +426,7 @@ pub fn transform_stream(
             PassSpec::Redact(cfg) => redact = Some(gfx_redact::Redact::new(cfg.clone())),
             #[cfg(feature = "blob-xform")]
             PassSpec::BlobXform(cfg) => {
-                blob_xform = Some(gfx_blob_xform::BlobXform::new(cfg.clone()))
+                blob_xform_cfg = Some(cfg.clone());
             }
         }
     }
@@ -443,6 +446,29 @@ pub fn transform_stream(
         content.apply(ev, &mut events)?;
     }
     content.finish(&mut events)?;
+
+    // D3 (plan-blob-xform-paths.md): synthetic blob marks must live above
+    // the stream's maximum mark (a colliding mark is silently redefined
+    // by fast-import and fails the import mid-stream — R3). The stream is
+    // fully parsed here, so the max is one cheap scan over materialized
+    // data (R4); inject `max + 1` before the stage runs.
+    let mut blob_xform: Option<gfx_blob_xform::BlobXform> = None;
+    if let Some(mut cfg) = blob_xform_cfg {
+        if !cfg.path_rules.is_empty() {
+            let max_mark = events
+                .iter()
+                .filter_map(|ev| match ev {
+                    Event::Commit(c) => c.mark,
+                    Event::Tag(t) => t.mark,
+                    Event::Blob { mark, .. } => *mark,
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0);
+            cfg.mark_base = Some(max_mark + 1);
+        }
+        blob_xform = Some(gfx_blob_xform::BlobXform::new(cfg));
+    }
 
     // Snapshot commit/tag/blob events by mark before any content pass, for
     // the rewrite detection below (remap's canonical-digest contract, plan
@@ -472,6 +498,14 @@ pub fn transform_stream(
     // D7): strip-blobs then judges post-transform sizes — a shrink can
     // save a blob from the knife, which is usually the desired reading.
     #[cfg(feature = "blob-xform")]
+    #[cfg(feature = "blob-xform")]
+    let blob_xform_rules: Vec<gfx_blob_xform::PathRule> = passes
+        .iter()
+        .find_map(|p| match p {
+            PassSpec::BlobXform(cfg) => Some(cfg.path_rules.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
     let mut blob_xform_report = None;
     #[cfg(feature = "blob-xform")]
     if let Some(x) = blob_xform.as_mut() {
@@ -626,13 +660,18 @@ pub fn transform_stream(
         redact_report,
         #[cfg(feature = "blob-xform")]
         blob_xform_report,
+        #[cfg(feature = "blob-xform")]
+        blob_xform_rules,
     };
 
     // Per-pass summaries + pre-finalization map (in pipeline order:
     // blob-xform → strip → redact → remap).
     #[cfg(feature = "blob-xform")]
     if let Some(r) = out.blob_xform_report.as_ref() {
-        out.passes.push(PassSummary { name: "blob-xform", detail: r.detail() });
+        out.passes.push(PassSummary {
+            name: "blob-xform",
+            detail: r.detail_with_rules(&out.blob_xform_rules),
+        });
     }
     #[cfg(feature = "strip-blobs")]
     if let Some(s) = strip.as_ref() {
