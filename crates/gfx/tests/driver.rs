@@ -487,3 +487,89 @@ fn r8_sha256_redact_identity_and_redaction() {
     assert!(!log.contains("a@x"), "sha256 mirror leaked the original email");
     gfx::git::process::fsck(&bare).expect("fsck --strict");
 }
+
+#[test]
+fn blob_xform_crlf_end_to_end() {
+    // plan-blob-xform.md §5 E2E: mixed text/binary history; after the
+    // rewrite all text blobs are LF-only and trimmed, the binary blob is
+    // byte-preserved, every commit referencing an altered blob got a NEW
+    // hash (blob→commit rewrite propagation in the driver's canonical-diff
+    // detection), and fsck is clean.
+    let base = tmpdir("bx");
+    let work = base.join("work");
+    let bare = base.join("bare.git");
+    std::fs::create_dir_all(&work).unwrap();
+    git(&base, &["init","-q","work"]);
+    let id = ["-c","user.email=t@t","-c","user.name=T"];
+    std::fs::write(work.join("a.txt"), b"line one  \r\nline two\t\r\nno newline at end\r\n\r\n")
+        .unwrap();
+    git(&work, &["add","."]);
+    git(&work, &[&id[..], &["commit","-qm","crlf text"][..]].concat());
+    // Binary blob: invalid UTF-8, no CR byte — the text transforms fail on
+    // it and the original is retained (D1).
+    std::fs::write(work.join("bin.dat"), [0xff, 0xfe, 0x00, 0x01, 0x02]).unwrap();
+    git(&work, &["add","."]);
+    git(&work, &[&id[..], &["commit","-qm","binary"][..]].concat());
+    git(&base, &["clone","-q","--bare","work","bare.git"]);
+    let _ = std::fs::remove_dir_all(&work);
+
+    let head_before = String::from_utf8(git(&bare, &["rev-parse","HEAD"])).unwrap();
+    let bin_before = String::from_utf8(git(&bare, &["rev-parse","HEAD:bin.dat"])).unwrap();
+
+    use gfx::gfx_blob_xform::{builtins, BlobXformConfig, SharedBlobTransform};
+    let shared = |t: &'static str| -> SharedBlobTransform {
+        match t {
+            "crlf" => SharedBlobTransform(std::sync::Arc::new(builtins::CrlfToLf)),
+            "trim" => SharedBlobTransform(std::sync::Arc::new(builtins::TrimTrailingWhitespace)),
+            _ => SharedBlobTransform(std::sync::Arc::new(builtins::EnsureFinalNewline)),
+        }
+    };
+    let mut d = PassDriver::new(&bare)
+        .unwrap()
+        .with_passes(vec![
+            PassSpec::BlobXform(BlobXformConfig {
+                transforms: vec![shared("crlf"), shared("trim"), shared("final")],
+                ..BlobXformConfig::default()
+            }),
+            PassSpec::Remap(gfx_remap::RemapConfig::default()),
+        ])
+        .unwrap();
+    let report = d.run().unwrap();
+
+    gfx::git::process::fsck(&bare).expect("fsck --strict");
+
+    // Text blob rewritten: LF-only, trimmed, exactly one trailing newline.
+    let a = git(&bare, &["show","HEAD:a.txt"]);
+    assert_eq!(a, b"line one\nline two\nno newline at end\n");
+
+    // Binary blob byte-preserved: same blob OID.
+    let bin_after = String::from_utf8(git(&bare, &["rev-parse","HEAD:bin.dat"])).unwrap();
+    assert_eq!(bin_before, bin_after, "retained blob keeps its OID");
+
+    // Both commits got new hashes (the blob-only rewrite propagated to the
+    // commits referencing the blob — commit events were byte-identical).
+    let head_after = String::from_utf8(git(&bare, &["rev-parse","HEAD"])).unwrap();
+    assert_ne!(head_before, head_after, "commit hashes must change when a blob changes");
+    let map = report.commit_map.expect("remap ran");
+    let mut saw_rewritten = false;
+    for (old, new) in map.iter() {
+        let new = new.expect("post-run map is finalized");
+        git(&bare, &["cat-file","-e",&new.to_hex().to_string()]);
+        if old != new {
+            saw_rewritten = true;
+        }
+    }
+    assert!(saw_rewritten, "commit-map records the blob-driven rewrite");
+
+    // Report: one altered (a.txt), one retained via text-decode failure
+    // (bin.dat); summary line present in pipeline order (before remap).
+    let names: Vec<&str> = report.passes.iter().map(|p| p.name).collect();
+    assert_eq!(names, ["blob-xform", "remap"], "pass summaries in pipeline order");
+    let detail = &report.passes[0].detail;
+    assert!(detail.contains("altered=1"), "{detail}");
+    assert!(detail.contains("failed=1"), "{detail}");
+
+    // Messages and topology intact.
+    let log = String::from_utf8(git(&bare, &["log","--format=%s"])).unwrap();
+    assert!(log.contains("binary") && log.contains("crlf text"));
+}

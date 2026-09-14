@@ -34,7 +34,10 @@ use std::path::{Path, PathBuf};
 
 use alloc::collections::{BTreeMap, BTreeSet};
 
-use gfx_core::{write_event, Committish, Error, Event, Mark, MarkFile, Parser, Pipeline, ParseOptions, Transform, Writer};
+use gfx_core::{
+    write_event, Committish, DataRef, Error, Event, FileOp, FileSource, Mark, MarkFile, Parser,
+    Pipeline, ParseOptions, Transform, Writer,
+};
 
 /// Errors from the driver layer. Subprocess failures keep their captured
 /// stderr; core errors map unchanged at the boundary.
@@ -109,6 +112,9 @@ pub enum PassSpec {
     /// Builtin: commit-metadata redaction (plan-redact-idents.md §4).
     #[cfg(feature = "redact")]
     Redact(gfx_redact::RedactConfig),
+    /// Builtin: generic fallible blob rewriting (plan-blob-xform.md).
+    #[cfg(feature = "blob-xform")]
+    BlobXform(gfx_blob_xform::BlobXformConfig),
 }
 
 impl PassSpec {
@@ -120,6 +126,8 @@ impl PassSpec {
             PassSpec::StripBlobs(_) => "strip-blobs",
             #[cfg(feature = "redact")]
             PassSpec::Redact(_) => "redact",
+            #[cfg(feature = "blob-xform")]
+            PassSpec::BlobXform(_) => "blob-xform",
         }
     }
 
@@ -381,6 +389,8 @@ pub struct TransformOutcome {
     pub strip_report: Option<gfx_strip_blobs::StripReport>,
     #[cfg(feature = "redact")]
     pub redact_report: Option<gfx_redact::RedactReport>,
+    #[cfg(feature = "blob-xform")]
+    pub blob_xform_report: Option<gfx_blob_xform::BlobXformReport>,
 }
 
 /// Parse `input` and run `passes` over it in pipeline order. Assumes the
@@ -399,6 +409,8 @@ pub fn transform_stream(
     let mut strip: Option<gfx_strip_blobs::StripBlobs> = None;
     #[cfg(feature = "redact")]
     let mut redact: Option<gfx_redact::Redact> = None;
+    #[cfg(feature = "blob-xform")]
+    let mut blob_xform: Option<gfx_blob_xform::BlobXform> = None;
     for p in passes {
         match p {
             #[cfg(feature = "remap")]
@@ -409,6 +421,10 @@ pub fn transform_stream(
             }
             #[cfg(feature = "redact")]
             PassSpec::Redact(cfg) => redact = Some(gfx_redact::Redact::new(cfg.clone())),
+            #[cfg(feature = "blob-xform")]
+            PassSpec::BlobXform(cfg) => {
+                blob_xform = Some(gfx_blob_xform::BlobXform::new(cfg.clone()))
+            }
         }
     }
     let mut content = content;
@@ -428,10 +444,13 @@ pub fn transform_stream(
     }
     content.finish(&mut events)?;
 
-    // Snapshot commit/tag events by mark before any content pass, for the
-    // rewrite detection below (remap's canonical-digest contract, plan §7
-    // decision 1, implemented host-side: the driver diffs each mark's event
-    // bytes across the whole content pipeline and flags what changed).
+    // Snapshot commit/tag/blob events by mark before any content pass, for
+    // the rewrite detection below (remap's canonical-digest contract, plan
+    // §7 decision 1, implemented host-side: the driver diffs each mark's
+    // event bytes across the whole content pipeline and flags what changed).
+    // Blobs are included because a blob-only rewrite (blob-xform) changes
+    // the hashes of every commit referencing it without touching the
+    // commit's own event bytes.
     #[cfg(feature = "remap")]
     let mut pre_image: BTreeMap<Mark, Vec<u8>> = BTreeMap::new();
     #[cfg(feature = "remap")]
@@ -439,6 +458,7 @@ pub fn transform_stream(
         let m = match ev {
             Event::Commit(c) => c.mark,
             Event::Tag(t) => t.mark,
+            Event::Blob { mark, .. } => *mark,
             _ => None,
         };
         if let Some(m) = m {
@@ -446,6 +466,22 @@ pub fn transform_stream(
             write_event(ev, &mut buf)?;
             pre_image.insert(m, buf);
         }
+    }
+
+    // Blob-xform runs FIRST among the content stages (plan-blob-xform.md
+    // D7): strip-blobs then judges post-transform sizes — a shrink can
+    // save a blob from the knife, which is usually the desired reading.
+    #[cfg(feature = "blob-xform")]
+    let mut blob_xform_report = None;
+    #[cfg(feature = "blob-xform")]
+    if let Some(x) = blob_xform.as_mut() {
+        let mut next = Vec::new();
+        for ev in events.drain(..) {
+            x.apply(ev, &mut next)?;
+        }
+        x.finish(&mut next)?;
+        events = next;
+        blob_xform_report = Some(x.report().clone());
     }
 
     #[cfg(feature = "strip-blobs")]
@@ -478,16 +514,31 @@ pub fn transform_stream(
     }
 
     // Rewrite detection: a mark is rewritten iff its event bytes changed
-    // across the content passes, or any mark-referenced parent/target was
-    // rewritten. Stream order is topological (parents precede children),
-    // so one forward pass closes the set transitively. OID parents belong
-    // to unchanged lineage (they keep their hashes by definition), so only
-    // marks propagate.
+    // across the content passes, any mark-referenced parent/target was
+    // rewritten, or — for commits — any op sources a blob mark whose bytes
+    // changed (plan-blob-xform.md: an altered blob rewrites the hash of
+    // every commit whose tree contains it, without touching the commit's
+    // own event bytes). Stream order is topological (parents precede
+    // children, blobs precede the commits referencing them), so one forward
+    // pass closes the set transitively. OID parents and OID-sourced blobs
+    // belong to unchanged lineage (they keep their hashes by definition),
+    // so only marks propagate.
     #[cfg(feature = "remap")]
     let rewritten_marks: BTreeSet<Mark> = {
         let mut all = BTreeSet::new();
+        let mut rewritten_blobs: BTreeSet<Mark> = BTreeSet::new();
         for ev in &events {
-            let (m, parents) = match ev {
+            let (m, parents, forced) = match ev {
+                Event::Blob { mark, .. } => {
+                    if let Some(m) = mark {
+                        let mut buf = Vec::new();
+                        write_event(ev, &mut buf)?;
+                        if pre_image.get(m) != Some(&buf) {
+                            rewritten_blobs.insert(*m);
+                        }
+                    }
+                    (None, Vec::new(), false)
+                }
                 Event::Commit(c) => {
                     let ps: Vec<Mark> = c
                         .from
@@ -498,21 +549,35 @@ pub fn transform_stream(
                             _ => None,
                         })
                         .collect();
-                    (c.mark, ps)
+                    let blob_hit = c.ops.iter().any(|op| match op {
+                        FileOp::Modify {
+                            source: FileSource::DataRef(DataRef::Mark(m)),
+                            ..
+                        } => rewritten_blobs.contains(m),
+                        FileOp::Note {
+                            data: FileSource::DataRef(DataRef::Mark(m)),
+                            ..
+                        } => rewritten_blobs.contains(m),
+                        _ => false,
+                    });
+                    (c.mark, ps, blob_hit)
                 }
                 Event::Tag(t) => {
                     let ps = match &t.from {
                         Some(Committish::Mark(m)) => vec![*m],
                         _ => Vec::new(),
                     };
-                    (t.mark, ps)
+                    (t.mark, ps, false)
                 }
-                _ => (None, Vec::new()),
+                _ => (None, Vec::new(), false),
             };
             if let Some(m) = m {
                 let mut buf = Vec::new();
                 write_event(ev, &mut buf)?;
-                if pre_image.get(&m) != Some(&buf) || parents.iter().any(|p| all.contains(p)) {
+                if forced
+                    || pre_image.get(&m) != Some(&buf)
+                    || parents.iter().any(|p| all.contains(p))
+                {
                     all.insert(m);
                 }
             }
@@ -559,9 +624,16 @@ pub fn transform_stream(
         strip_report,
         #[cfg(feature = "redact")]
         redact_report,
+        #[cfg(feature = "blob-xform")]
+        blob_xform_report,
     };
 
-    // Per-pass summaries + pre-finalization map.
+    // Per-pass summaries + pre-finalization map (in pipeline order:
+    // blob-xform → strip → redact → remap).
+    #[cfg(feature = "blob-xform")]
+    if let Some(r) = out.blob_xform_report.as_ref() {
+        out.passes.push(PassSummary { name: "blob-xform", detail: r.detail() });
+    }
     #[cfg(feature = "strip-blobs")]
     if let Some(s) = strip.as_ref() {
         out.passes.push(PassSummary {

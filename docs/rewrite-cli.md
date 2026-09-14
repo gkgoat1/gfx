@@ -150,6 +150,40 @@ new_email = "bot1@ci.invalid"
 TOML is UTF-8, so rows cannot express non-UTF-8 ident bytes; host code
 injects an `IdentPolicy` for that.
 
+### blob-xform
+
+Pass name `blob-xform`; registered in the composed `gfx` binary but **not
+in the default `--passes`** — content rewriting is always opt-in. Runs a
+fallible transform chain over every blob payload (standalone blobs and
+inline `M`/`N` data): **alter on success, retain the original bytes on
+failure** (plan-blob-xform.md, decision D1). Never drops, synthesizes, or
+reorders an event; commits referencing an altered blob get new hashes as
+usual (remap owns that bookkeeping).
+
+| Flag | Meaning |
+|---|---|
+| `--blob-xform.crlf-to-lf` | chain stage: CRLF/CR line endings become LF (byte-level, never fails) |
+| `--blob-xform.trim-trailing-whitespace` | chain stage: strip trailing spaces/tabs per line (text blobs; non-UTF-8 ⇒ retained) |
+| `--blob-xform.ensure-final-newline` | chain stage: end text blobs with exactly one newline (text blobs; empty stays empty) |
+| `--blob-xform.skip-larger-than <size>` | leave blobs larger than this alone (counted as retained-guard) |
+| `--blob-xform.max-output-bytes <size>` | discard a chain result larger than this; retain the original |
+| `--blob-xform.include-special-modes` | also transform inline symlink/gitlink payloads (skipped by default) |
+
+- **Chain order is argv order**:
+  `--blob-xform.crlf-to-lf --blob-xform.trim-trailing-whitespace` runs the
+  line-ending fix first. Any stage failing retains the *original* bytes,
+  not the last good intermediate (D1 atomicity).
+- `blob-xform` in `--passes` with no transform flag is a usage error, and
+  `--blob-xform.*` flags without the pass in `--passes` are a usage error:
+  content rewriting is never silently skipped.
+- Fixed stage order in the driver: blob-xform runs *before* strip-blobs,
+  so size-based stripping judges post-transform sizes (plan-blob-xform.md
+  D7).
+- Standalone `blob` events carry no file mode: byte-level transforms like
+  `crlf-to-lf` apply to *every* blob, binaries included. If a blob must
+  not be touched, gate it with `--blob-xform.skip-larger-than` or keep
+  binary history out of scope (the symlink caveat: plan-blob-xform.md D5).
+
 ## Pre-sharing checklist
 
 Redacting idents and times does not make a repo anonymous. Before
@@ -242,6 +276,9 @@ way (`examples/strip-blobs.rs`, `examples/remap.rs`).
   pre-sharing checklist above.
 - `--redact.map` rows cannot express non-UTF-8 ident bytes (TOML
   limitation); use an injected `IdentPolicy` from host code.
+- blob-xform's external-command adapter (`--blob-xform.cmd`) is not
+  implemented yet (plan-blob-xform.md M2); custom transforms today are
+  host-injected via the library API.
 
 - Buffered rounds: the export stream and event list live in memory.
 - Empty branches (refs with no commits) are dropped by the round-trip.

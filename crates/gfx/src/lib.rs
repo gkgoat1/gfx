@@ -20,6 +20,9 @@ pub use gfx_strip_blobs;
 #[cfg(feature = "redact")]
 pub use gfx_redact;
 
+#[cfg(feature = "blob-xform")]
+pub use gfx_blob_xform;
+
 /// Everything a host typically needs.
 pub mod prelude {
     pub use gfx_core::{

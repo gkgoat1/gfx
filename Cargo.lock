@@ -583,6 +583,7 @@ dependencies = [
 name = "gfx"
 version = "0.1.0"
 dependencies = [
+ "gfx-blob-xform",
  "gfx-core",
  "gfx-redact",
  "gfx-remap",

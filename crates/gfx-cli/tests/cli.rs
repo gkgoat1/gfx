@@ -495,3 +495,79 @@ fn config_file_redact_table() {
     );
     assert_eq!(code, gfx_cli::EXIT_USAGE);
 }
+
+// ---------------------------------------------------------------------------
+// blob-xform wiring (plan-blob-xform.md §4.3)
+
+fn blob_xform_registry() -> PassRegistry {
+    PassRegistry::new(vec![
+        gfx_cli::passes::strip_blobs_factory(),
+        gfx_cli::passes::redact_factory(),
+        gfx_cli::passes::blob_xform_factory(),
+        gfx_cli::passes::remap_factory(),
+    ])
+    .unwrap()
+}
+
+#[test]
+fn blob_xform_chain_follows_argv_order() {
+    let reg = blob_xform_registry();
+    let specs = reg.all_args(&gfx_cli::cli::global_args());
+    let map = parse_argv(
+        &specs,
+        &os(&[
+            "--passes", "blob-xform",
+            "--blob-xform.ensure-final-newline",
+            "--blob-xform.crlf-to-lf",
+            "--blob-xform.skip-larger-than", "1M",
+        ]),
+    )
+    .unwrap();
+    let passes = reg.resolve("blob-xform", &map).unwrap();
+    match &passes[0] {
+        PassSpec::BlobXform(cfg) => {
+            let names: Vec<String> =
+                cfg.transforms.iter().map(|t| t.0.describe()).collect();
+            assert_eq!(names, ["ensure-final-newline", "crlf-to-lf"], "chain = argv order");
+            assert_eq!(cfg.skip_larger_than, Some(1 << 20));
+            assert_eq!(cfg.max_output_bytes, None);
+            assert!(cfg.include_inline);
+            assert!(!cfg.include_special_modes);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn blob_xform_without_transform_flags_is_a_usage_error() {
+    let reg = blob_xform_registry();
+    let specs = reg.all_args(&gfx_cli::cli::global_args());
+    let map = parse_argv(&specs, &os(&["--passes", "blob-xform"])).unwrap();
+    let err = reg.resolve("blob-xform", &map).unwrap_err();
+    assert!(matches!(err, gfx_cli::CliError::FlagConflict(_)), "{err:?}");
+}
+
+#[test]
+fn blob_xform_flags_without_the_pass_are_rejected() {
+    let reg = blob_xform_registry();
+    let specs = reg.all_args(&gfx_cli::cli::global_args());
+    let map = parse_argv(
+        &specs,
+        &os(&["--passes", "strip-blobs", "--blob-xform.crlf-to-lf"]),
+    )
+    .unwrap();
+    let err = gfx_cli::resolve_passes_checked(&reg, &map).unwrap_err();
+    match err {
+        gfx_cli::CliError::FlagConflict(msg) => {
+            assert!(msg.contains("blob-xform"), "{msg}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn blob_xform_is_registered_but_never_default() {
+    let reg = blob_xform_registry();
+    assert!(!reg.default_spec().contains("blob-xform"), "opt-in only");
+    assert!(reg.names().contains(&"blob-xform"), "discoverable");
+}

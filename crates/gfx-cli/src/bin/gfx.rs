@@ -7,6 +7,7 @@ fn factories() -> Vec<Box<dyn gfx_cli::PassFactory>> {
     vec![
         Box::new(gfx_cli::passes::strip_blobs_factory()),
         Box::new(gfx_cli::passes::redact_factory()),
+        Box::new(gfx_cli::passes::blob_xform_factory()),
         Box::new(gfx_cli::passes::remap_factory()),
     ]
 }

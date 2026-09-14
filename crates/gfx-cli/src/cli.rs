@@ -101,6 +101,13 @@ pub fn resolve_passes_checked(
                 "--{key} given but the redact pass is not in --passes; redaction must never be silently skipped"
             )));
         }
+        if key.starts_with("blob-xform.")
+            && !passes.iter().any(|p| p.name() == "blob-xform")
+        {
+            return Err(CliError::FlagConflict(format!(
+                "--{key} given but the blob-xform pass is not in --passes; content rewriting must never be silently skipped"
+            )));
+        }
     }
 
     let mut remap_seen = false;

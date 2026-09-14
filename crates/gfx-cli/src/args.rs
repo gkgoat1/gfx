@@ -100,6 +100,10 @@ pub struct CliArg {
 pub struct ArgMap {
     values: BTreeMap<String, Vec<String>>,
     present: std::collections::BTreeSet<String>,
+    /// Every explicitly-given key, in the order given (repeats included;
+    /// config-file entries append after argv entries). Passes whose flags
+    /// are order-sensitive (blob-xform's transform chain) read this.
+    order: Vec<String>,
 }
 
 impl ArgMap {
@@ -138,13 +142,20 @@ impl ArgMap {
         }
     }
 
+    /// Explicitly-given keys, in the order given (repeats included).
+    pub fn ordered_keys(&self) -> &[String] {
+        &self.order
+    }
+
     pub(crate) fn put(&mut self, key: &str, value: String) {
         self.values.entry(key.to_string()).or_default().push(value);
         self.present.insert(key.to_string());
+        self.order.push(key.to_string());
     }
 
     pub(crate) fn mark_present(&mut self, key: &str) {
         self.present.insert(key.to_string());
+        self.order.push(key.to_string());
     }
 }
 

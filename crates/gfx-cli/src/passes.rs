@@ -322,3 +322,83 @@ impl PassFactory for RedactFactory {
         }))
     }
 }
+
+// ---------------------------------------------------------------------------
+// blob-xform (plan-blob-xform.md §4.3)
+
+pub struct BlobXformFactory;
+
+pub fn blob_xform_factory() -> Box<dyn PassFactory> {
+    Box::new(BlobXformFactory)
+}
+
+impl PassFactory for BlobXformFactory {
+    fn name(&self) -> &'static str {
+        "blob-xform"
+    }
+
+    fn in_default(&self) -> bool {
+        // Content rewriting is always opt-in (same stance as redact's D2).
+        false
+    }
+
+    fn arg_spec(&self) -> Vec<ArgSpec> {
+        vec![
+            ArgSpec::flag("crlf-to-lf", "chain: CRLF/CR line endings become LF"),
+            ArgSpec::flag(
+                "trim-trailing-whitespace",
+                "chain: strip trailing spaces/tabs per line (text blobs)",
+            ),
+            ArgSpec::flag(
+                "ensure-final-newline",
+                "chain: end text blobs with exactly one newline",
+            ),
+            ArgSpec::size("skip-larger-than", None, "leave blobs larger than this alone"),
+            ArgSpec::size(
+                "max-output-bytes",
+                None,
+                "discard a chain result larger than this (retain the original)",
+            ),
+            ArgSpec::flag(
+                "include-special-modes",
+                "also transform inline symlink/gitlink payloads (plan-blob-xform.md D5)",
+            ),
+        ]
+    }
+
+    fn build(&self, args: &ArgMap) -> Result<PassSpec, CliError> {
+        use gfx::gfx_blob_xform::{builtins, SharedBlobTransform};
+        fn shared<T: gfx::gfx_blob_xform::BlobTransform + 'static>(t: T) -> SharedBlobTransform {
+            SharedBlobTransform(std::sync::Arc::new(t))
+        }
+        // Chain order = argv order (plan §4.3).
+        let mut transforms: Vec<SharedBlobTransform> = Vec::new();
+        for key in args.ordered_keys() {
+            let t = match key.as_str() {
+                "blob-xform.crlf-to-lf" => Some(shared(builtins::CrlfToLf)),
+                "blob-xform.trim-trailing-whitespace" => {
+                    Some(shared(builtins::TrimTrailingWhitespace))
+                }
+                "blob-xform.ensure-final-newline" => Some(shared(builtins::EnsureFinalNewline)),
+                _ => None,
+            };
+            if let Some(t) = t {
+                transforms.push(t);
+            }
+        }
+        if transforms.is_empty() {
+            return Err(CliError::FlagConflict(
+                "blob-xform needs at least one transform flag \
+                 (e.g. --blob-xform.crlf-to-lf); nothing to do otherwise"
+                    .into(),
+            ));
+        }
+        Ok(PassSpec::BlobXform(gfx::gfx_blob_xform::BlobXformConfig {
+            transforms,
+            skip_larger_than: args.size("blob-xform.skip-larger-than")?,
+            max_output_bytes: args.size("blob-xform.max-output-bytes")?,
+            include_inline: true,
+            include_special_modes: args.flag("blob-xform.include-special-modes"),
+        }))
+    }
+}

@@ -2,10 +2,10 @@
 
 | Field    | Value |
 |----------|-------|
-| Status   | Proposed |
+| Status   | Implemented (M0–M1; M2 external-command adapter next) |
 | Scope    | builtin pass: run a fallible `Vec<u8>`/`String` transform over every blob; alter on success, retain original on failure |
 | Depends  | plan-fast-export.md §5 (architecture), §6 (builtin framework); plan-pass-driver-strip-blobs.md §4 (driver, registry), §5.2 (injected-predicate pattern); plan-redact-idents.md (injected `IdentPolicy` pattern); plan-multistream-pack.md M4 (Send/Sync shared handles) |
-| Updated  | 2026-09-13 |
+| Updated  | 2026-09-13 (M0 crate + M1 driver/CLI wiring; see [rewrite-cli.md](rewrite-cli.md) for the user-facing surface) |
 
 ---
 
@@ -129,12 +129,13 @@ first-class, deterministic, `no_std` home with explicit failure semantics.
   for downstream audit/mark-folding. Streams already carry these lines
   end-to-end (`--show-original-ids` export → fast-import), so nothing new
   is introduced on the import path.
-- **D7 — Order is the user's, consequences documented.** The pass runs
-  wherever `--passes` places it (content passes precede remap, as always).
-  Two interactions worth a doc line, not a hard rule: before strip-blobs,
+- **D7 — Fixed stage order: blob-xform before strip-blobs.** The driver
+  runs content stages in a fixed sequence (blob-xform → strip → redact →
+  remap), as it already did for strip/redact — `--passes` order selects
+  *which* passes run, not their relative order. Blob-xform runs first so
   size-based stripping judges *post-transform* sizes (a shrink can save a
-  blob from the knife — usually desired); relative to redact, the passes
-  are orthogonal (disjoint fields).
+  blob from the knife — usually the desired reading); relative to redact
+  the passes are orthogonal (disjoint fields).
 
 ## 4. Design
 
