@@ -23,6 +23,7 @@ repository = "https://example.invalid/gfx"
 
 [workspace.dependencies]
 bstr = { version = "1", default-features = false, features = ["alloc"] }
+flate2 = "1"
 gfx-core = { path = "crates/gfx-core" }
 gfx = { path = "crates/gfx" }
 gfx-hash = { path = "crates/gfx-hash" }

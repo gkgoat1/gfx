@@ -2,7 +2,7 @@
 
 |            |                                                                    |
 |------------|--------------------------------------------------------------------|
-| Status     | In progress (M0 done)                                              |
+| Status     | In progress (M0–M1 done)                                           |
 | Created    | 2026-10-08                                                         |
 | Updated    | 2026-10-08 (M0)                                                    |
 | Depends on | [plan-pass-driver-strip-blobs.md](plan-pass-driver-strip-blobs.md) §4 (driver), [plan-fast-export.md](plan-fast-export.md) §5–§7 (architecture, remap), [plan-redact-idents.md](plan-redact-idents.md) (redact pass), [plan-remote-data.md](plan-remote-data.md) (remotes policies), [rewrite-cli.md](rewrite-cli.md) (CLI surface) |
@@ -335,10 +335,15 @@ byte-identical.
       (`<out>.gfx/` + `commit-marks`) deliberately wait for M1, which
       adds the marks-aware write path. Tests: `crates/gfx/tests/endpoints.rs`
       (facade, 8 tests), `crates/gfx-cli/tests/endpoints.rs` (CLI, 3).
-- [ ] **M1 — gzip.** D2 sniffing + deterministic encoding; `--out-compression`,
-      `--out-gzip-level`. Tests: magic sniffing vs. misleading names;
-      gzip ⇒ gunzip round-trip identity; two runs ⇒ identical bytes (C2);
-      `flate2` version pinned in `Cargo.lock` with a determinism note.
+- [x] **M1 — gzip.** D2 sniffing + deterministic encoding (flate2 default
+      header: mtime 0, no name, OS 255; level pinned, default 6);
+      `--out-compression` / `--out-gzip-level`; `flate2` is now a workspace
+      dependency (`gfx` std-gated, `gfx-pack` moved onto it). Stream-sink
+      artifact surface landed here: `<out>.gfx/` (or `--artifacts`) with
+      `commit-map` (pre-finalization view), `ref-map`, `run-report.txt`,
+      per-pass reports, and `commit-marks` (mark space; C6). Tests: magic
+      sniffing vs. misleading names both directions, byte-determinism
+      across runs, `.gz` round-trip through import (facade + CLI).
 - [ ] **M2 — `gfx-ignore` matcher.** no_std crate, gitignore semantics
       per D6, property tests against `git check-ignore` fixtures (host
       side generates cases: temp repo, patterns × paths, compare verdict

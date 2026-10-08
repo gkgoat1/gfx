@@ -38,6 +38,16 @@ pub fn global_args() -> Vec<ArgSpec> {
             None,
             "artifact directory for stream sinks (default <out>.gfx/; meaningless with a repo sink)",
         ),
+        ArgSpec::value(
+            "out-compression",
+            None,
+            "stream output framing: auto (default; .gz suffix ⇒ gzip) | none | gzip",
+        ),
+        ArgSpec::value(
+            "out-gzip-level",
+            None,
+            "gzip level 1-9 for stream output (default 6; pinned for reproducible bytes)",
+        ),
         ArgSpec::flag("force", "override the fresh-clone safety check"),
         ArgSpec::flag(
             "save-remotes",
@@ -227,6 +237,27 @@ fn build_driver(map: &ArgMap) -> Result<PassDriver, CliError> {
     };
     if let Some(dir) = map.value("artifacts") {
         driver = driver.with_artifacts_dir(std::path::PathBuf::from(dir))?;
+    }
+    let compression = match map.value("out-compression") {
+        None => gfx::streamfile::StreamCompression::Auto,
+        Some(s) => gfx::streamfile::StreamCompression::parse(s).ok_or_else(|| {
+            CliError::FlagConflict(format!(
+                "bad --out-compression {s:?} (want auto|none|gzip)"
+            ))
+        })?,
+    };
+    let level = match map.value("out-gzip-level") {
+        None => gfx::streamfile::DEFAULT_GZIP_LEVEL,
+        Some(s) => s.parse::<u32>().ok().filter(|n| (1..=9).contains(n)).ok_or_else(|| {
+            CliError::FlagConflict(format!(
+                "bad --out-gzip-level {s:?} (want 1-9)"
+            ))
+        })?,
+    };
+    if compression != gfx::streamfile::StreamCompression::Auto
+        || map.value("out-gzip-level").is_some()
+    {
+        driver = driver.with_out_compression(compression, level)?;
     }
     Ok(driver)
 }

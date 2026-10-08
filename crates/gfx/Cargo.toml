@@ -12,12 +12,13 @@ remap = ["dep:gfx-remap"]
 strip-blobs = ["dep:gfx-strip-blobs"]
 redact = ["dep:gfx-redact"]
 blob-xform = ["dep:gfx-blob-xform"]
-std = []
+std = ["dep:flate2"]
 # std + git subprocess drivers (integration testing / convenience; plan §9)
 git = ["std"]
 
 [dependencies]
 gfx-core = { workspace = true }
+flate2 = { workspace = true, optional = true }
 gfx-remap = { workspace = true, optional = true }
 gfx-redact = { workspace = true, optional = true }
 gfx-strip-blobs = { workspace = true, optional = true }

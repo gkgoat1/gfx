@@ -583,6 +583,7 @@ dependencies = [
 name = "gfx"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "gfx-blob-xform",
  "gfx-core",
  "gfx-redact",
@@ -1703,3 +1704,4 @@ name = "zlib-rs"
 version = "0.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34b31d188d9d685a4f9c7b46d6e36631b07058d2cfe190267adce54dc230bf12"
+

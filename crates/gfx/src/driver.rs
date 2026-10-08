@@ -326,17 +326,22 @@ pub enum Sink {
     Stream(PathBuf),
 }
 
-/// Read a stream file into memory (buffered rounds, R2). Bytes pass
-/// through verbatim in v1 — gzip decode arrives with M1's magic sniff.
+/// Read a stream file (buffered rounds, R2); gzip-magic sniffing lives in
+/// [`crate::streamfile`]. Kept as a thin re-export-free alias for the
+/// driver's internal use and for hosts that predate the framing module.
 pub fn read_stream(path: &Path) -> Result<Vec<u8>, DriverError> {
-    Ok(std::fs::read(path)?)
+    crate::streamfile::read_stream_file(path)
 }
 
-/// Write a stream file verbatim (buffered rounds, R2). The parent
-/// directory must exist (no implicit creation — a typo'd path is an
-/// error, not a tree of new directories).
+/// Write a stream file. The parent directory must exist (no implicit
+/// creation — a typo'd path is an error, not a tree of new directories).
 pub fn write_stream(path: &Path, bytes: &[u8]) -> Result<(), DriverError> {
-    Ok(std::fs::write(path, bytes)?)
+    crate::streamfile::write_stream_file(
+        path,
+        bytes,
+        crate::streamfile::StreamCompression::Auto,
+        crate::streamfile::DEFAULT_GZIP_LEVEL,
+    )
 }
 
 /// The pass driver. Construct with [`PassDriver::new`] (repo → repo, as
@@ -355,6 +360,9 @@ pub struct PassDriver {
     /// Explicit artifact directory for stream sinks (D4). `None` =
     /// `<out>.gfx/` next to the output file.
     artifacts_dir: Option<PathBuf>,
+    /// Stream output framing (D2): auto/none/gzip plus the pinned level.
+    out_compression: crate::streamfile::StreamCompression,
+    out_gzip_level: u32,
 }
 
 impl PassDriver {
@@ -372,6 +380,8 @@ impl PassDriver {
             restore_remotes: false,
             remote_refs: RemoteRefsPolicy::default(),
             artifacts_dir: None,
+            out_compression: crate::streamfile::StreamCompression::default(),
+            out_gzip_level: crate::streamfile::DEFAULT_GZIP_LEVEL,
         })
     }
 
@@ -401,9 +411,51 @@ impl PassDriver {
             restore_remotes: false,
             remote_refs: RemoteRefsPolicy::default(),
             artifacts_dir: None,
+            out_compression: crate::streamfile::StreamCompression::default(),
+            out_gzip_level: crate::streamfile::DEFAULT_GZIP_LEVEL,
         };
         d.validate_endpoints()?;
         Ok(d)
+    }
+
+    /// Stream-sink framing (plan-stream-files.md D2): `auto` lets the
+    /// `.gz` suffix decide; the level is pinned (1–9) for determinism
+    /// (C2). Meaningless for repo sinks — rejected there.
+    pub fn with_out_compression(
+        mut self,
+        compression: crate::streamfile::StreamCompression,
+        level: u32,
+    ) -> Result<Self, DriverError> {
+        if matches!(self.sink, Sink::Repo(_)) {
+            return Err(DriverError::Endpoint(
+                "--out-compression/--out-gzip-level are only meaningful with a stream sink (--out)".into(),
+            ));
+        }
+        if !(1..=9).contains(&level) {
+            return Err(DriverError::Endpoint(alloc::format!(
+                "gzip level {level} out of range (want 1–9)"
+            )));
+        }
+        self.out_compression = compression;
+        self.out_gzip_level = level;
+        Ok(self)
+    }
+
+    /// Where stream-sink artifacts land (D4): the explicit override, or
+    /// `<out>.gfx/` next to the output file.
+    fn stream_artifacts_dir(&self) -> Option<PathBuf> {
+        match &self.sink {
+            Sink::Stream(p) => Some(match &self.artifacts_dir {
+                Some(d) => d.clone(),
+                None => {
+                    use std::ffi::OsString;
+                    let mut s = OsString::from(p.as_os_str());
+                    s.push(".gfx");
+                    PathBuf::from(s)
+                }
+            }),
+            Sink::Repo(_) => None,
+        }
     }
 
     /// Artifact directory override for stream sinks (plan-stream-files.md
@@ -616,11 +668,29 @@ impl PassDriver {
             return Ok(report);
         }
 
-        // Stream sink (plan-stream-files.md): write the output bytes and
-        // stop — no import, no ref-map, no artifacts (D4's artifact
-        // surface lands with the marks-aware M1).
+        // Stream sink (plan-stream-files.md): write the output bytes,
+        // then the D4 artifact surface. There is no import, so the
+        // commit map cannot be finalized (C6): `commit-marks` records
+        // mark space (`old-oid :mark`, or `:mark` alone for foreign
+        // streams) and `commit-map` keeps remap's pre-finalization view.
         if let Sink::Stream(path) = &self.sink {
-            write_stream(path, &out.output)?;
+            crate::streamfile::write_stream_file(
+                path,
+                &out.output,
+                self.out_compression,
+                self.out_gzip_level,
+            )?;
+            let dir = self
+                .stream_artifacts_dir()
+                .expect("stream sink has an artifacts dir");
+            std::fs::create_dir_all(&dir)?;
+            write_artifacts(&dir, &report)?;
+            write_pass_reports(&dir, &out)?;
+            #[cfg(feature = "remap")]
+            if let Some(r) = out.remap.as_ref() {
+                std::fs::write(dir.join("commit-marks"), commit_marks_text(&input, r)?)?;
+            }
+            report.artifacts_dir = Some(dir);
             return Ok(report);
         }
         let Sink::Repo(sink_repo) = &self.sink else {
@@ -708,19 +778,85 @@ impl PassDriver {
                 std::fs::write(gfx_dir.join("remote-state.txt"), cap.state.render_text())?;
             }
         }
-        #[cfg(feature = "strip-blobs")]
-        if let Some(sr) = out.strip_report.as_ref() {
-            std::fs::write(gfx_dir.join("strip-report.txt"), sr.to_text())?;
-        }
-        // The mapping artifact is SENSITIVE (plan §4.8): it re-identifies
-        // the redacted repo. Written only on real runs, never in dry-run.
-        #[cfg(feature = "redact")]
-        if let Some(rr) = out.redact_report.as_ref() {
-            std::fs::write(gfx_dir.join("redact-map.txt"), rr.to_text())?;
-        }
+        write_pass_reports(&gfx_dir, &out)?;
         report.artifacts_dir = Some(gfx_dir);
         Ok(report)
     }
+}
+
+/// The per-pass report artifacts, shared by repo and stream sinks.
+fn write_pass_reports(dir: &Path, out: &TransformOutcome) -> Result<(), DriverError> {
+    #[cfg(feature = "strip-blobs")]
+    if let Some(sr) = out.strip_report.as_ref() {
+        std::fs::write(dir.join("strip-report.txt"), sr.to_text())?;
+    }
+    // The mapping artifact is SENSITIVE (plan §4.8): it re-identifies
+    // the redacted repo. Written only on real runs, never in dry-run.
+    #[cfg(feature = "redact")]
+    if let Some(rr) = out.redact_report.as_ref() {
+        std::fs::write(dir.join("redact-map.txt"), rr.to_text())?;
+    }
+    Ok(())
+}
+
+/// The mark-space commit map (plan-stream-files.md D4/C6):
+/// `<old-oid> :<mark>` per commit that carried an `original-oid`, then
+/// `:<mark>` alone for commits that did not (foreign streams, D5). Both
+/// sections sorted — old OIDs byte-sorted, bare marks ascending — so the
+/// artifact is deterministic. New OIDs appear only after a downstream
+/// `git fast-import` assigns them (mode A finalization).
+#[cfg(feature = "remap")]
+fn commit_marks_text(input: &[u8], remap: &gfx_remap::Remap) -> Result<String, DriverError> {
+    let mut parser = Parser::new(ParseOptions::default());
+    parser.feed(input);
+    let mut marked: alloc::collections::BTreeSet<Mark> = alloc::collections::BTreeSet::new();
+    let mut with_oid: alloc::collections::BTreeSet<Mark> = alloc::collections::BTreeSet::new();
+    while let Some(ev) = parser.next_event()? {
+        if let Event::Commit(c) = &ev {
+            if let Some(m) = c.mark {
+                marked.insert(m);
+                if c.original_oid.is_some() {
+                    with_oid.insert(m);
+                }
+            }
+        }
+    }
+    let mut tail = Vec::new();
+    parser.finish(&mut tail)?;
+    for ev in &tail {
+        if let Event::Commit(c) = ev {
+            if let Some(m) = c.mark {
+                marked.insert(m);
+                if c.original_oid.is_some() {
+                    with_oid.insert(m);
+                }
+            }
+        }
+    }
+    let mut mapped: Vec<String> = Vec::new();
+    let mut bare: Vec<Mark> = Vec::new();
+    for m in &marked {
+        if !with_oid.contains(m) {
+            bare.push(*m);
+        }
+    }
+    // old-oid → mark pairs, old-OID byte-sorted: reuse remap's index by
+    // walking the pre-finalization commit map.
+    let cm = remap.commit_map();
+    for (old, _) in cm.iter() {
+        if let Some(mark) = remap.mark_for(old) {
+            mapped.push(alloc::format!("{} :{}\n", old.to_hex(), mark));
+        }
+    }
+    let mut s = String::new();
+    s.push_str("# commit-marks: mark-space commit map (new OIDs are assigned at import time)\n");
+    for line in mapped {
+        s.push_str(&line);
+    }
+    for m in bare {
+        s.push_str(&alloc::format!(":{m}\n"));
+    }
+    Ok(s)
 }
 
 /// The transform half of a round: parse an export stream and push it

@@ -9,7 +9,7 @@ license.workspace = true
 [dependencies]
 gfx = { workspace = true, features = ["std", "git", "remap", "strip-blobs", "redact", "blob-xform"] }
 gfx-redact = { workspace = true }
-flate2 = "1"
+flate2 = { workspace = true }
 crc32fast = "1"
 sha2 = "0.10"
 toml = { version = "0.8", features = ["parse"] }

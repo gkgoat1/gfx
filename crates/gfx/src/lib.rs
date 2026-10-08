@@ -38,6 +38,9 @@ pub mod git;
 #[cfg(feature = "git")]
 pub mod driver;
 
+#[cfg(feature = "std")]
+pub mod streamfile;
+
 #[cfg(feature = "git")]
 pub mod remotes;
 

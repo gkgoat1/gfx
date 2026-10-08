@@ -6,7 +6,7 @@
 
 #![cfg(all(feature = "git", feature = "remap"))]
 
-use gfx::driver::{read_stream, DriverError, PassDriver, Sink, Source};
+use gfx::driver::{read_stream, DriverError, PassDriver, PassSpec, Sink, Source};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -301,4 +301,157 @@ fn stream_read_is_verbatim_in_v1() {
     let p = base.join("raw.feat");
     std::fs::write(&p, b"blob\nmark :1\ndata 4\nxyz\n").unwrap();
     assert_eq!(read_stream(&p).unwrap(), b"blob\nmark :1\ndata 4\nxyz\n");
+}
+
+// ---------------------------------------------------------------------------
+// M1: gzip framing (plan-stream-files.md D2)
+
+#[test]
+fn gzip_output_sniffs_roundtrips_and_is_deterministic() {
+    let bare = make_source_bare("gz");
+    let base = bare.parent().unwrap().to_path_buf();
+    let out = base.join("out.feat.gz");
+
+    let run = || {
+        let mut d = PassDriver::with_endpoints(
+            Source::Repo(bare.clone()),
+            Sink::Stream(out.clone()),
+        )
+        .unwrap()
+        .with_passes(vec![])
+        .unwrap()
+        .with_out_compression(gfx::streamfile::StreamCompression::Auto, 6)
+        .unwrap();
+        d.run().unwrap()
+    };
+    run();
+    let first = std::fs::read(&out).unwrap();
+    assert!(first.starts_with(&gfx::streamfile::GZIP_MAGIC), "auto + .gz ⇒ gzip");
+    // C2: identical inputs ⇒ identical bytes.
+    run();
+    assert_eq!(std::fs::read(&out).unwrap(), first, "deterministic gzip container");
+
+    // Sniffed on read: importing the .gz works without telling anyone.
+    let dest = base.join("dest.git");
+    git(&base, &["init", "-q", "--bare", "dest.git"]);
+    let mut d = PassDriver::with_endpoints(Source::Stream(out.clone()), Sink::Repo(dest.clone()))
+        .unwrap()
+        .with_passes(vec![])
+        .unwrap();
+    d.run().unwrap();
+    assert_eq!(refs_snapshot(&dest), refs_snapshot(&bare));
+
+    // And the sniff is magic-based, not name-based: rename to .feat.
+    let misnamed = base.join("misnamed.feat");
+    std::fs::rename(&out, &misnamed).unwrap();
+    let decoded = gfx::streamfile::read_stream_file(&misnamed).unwrap();
+    assert!(
+        !decoded.starts_with(&gfx::streamfile::GZIP_MAGIC) && !decoded.is_empty(),
+        "decoded stream bytes, not gzip"
+    );
+    assert_eq!(decoded, gfx::git::process::export_stream(&bare, &[]).unwrap());
+}
+
+#[test]
+fn raw_output_with_misleading_gz_name_stays_raw_and_decodes_raw() {
+    let bare = make_source_bare("raw");
+    let base = bare.parent().unwrap().to_path_buf();
+    let out = base.join("raw.gz"); // name lies; compression none wins
+
+    let mut d = PassDriver::with_endpoints(
+        Source::Repo(bare.clone()),
+        Sink::Stream(out.clone()),
+    )
+    .unwrap()
+    .with_passes(vec![])
+    .unwrap()
+    .with_out_compression(gfx::streamfile::StreamCompression::None, 6)
+    .unwrap();
+    d.run().unwrap();
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(!bytes.starts_with(&gfx::streamfile::GZIP_MAGIC), "none ⇒ raw even for .gz");
+    assert_eq!(gfx::streamfile::read_stream_file(&out).unwrap(), bytes);
+
+    // A raw file named .gz is read verbatim (sniff, not extension).
+    let dest = base.join("dest.git");
+    git(&base, &["init", "-q", "--bare", "dest.git"]);
+    let mut d = PassDriver::with_endpoints(Source::Stream(out), Sink::Repo(dest.clone()))
+        .unwrap()
+        .with_passes(vec![])
+        .unwrap();
+    d.run().unwrap();
+    assert_eq!(refs_snapshot(&dest), refs_snapshot(&bare));
+}
+
+#[test]
+fn stream_sink_artifacts_land_next_to_out_by_default() {
+    let bare = make_source_bare("art");
+    let base = bare.parent().unwrap().to_path_buf();
+    let out = base.join("snap.feat");
+
+    let mut d = PassDriver::with_endpoints(
+        Source::Repo(bare.clone()),
+        Sink::Stream(out.clone()),
+    )
+    .unwrap()
+    .with_passes(vec![])
+    .unwrap();
+    let report = d.run().unwrap();
+    let dir = base.join("snap.feat.gfx");
+    assert_eq!(report.artifacts_dir.as_deref(), Some(dir.as_path()));
+    for f in ["commit-map", "ref-map", "run-report.txt", "commit-marks"] {
+        assert!(dir.join(f).exists(), "missing artifact {f}");
+    }
+    // commit-marks: mark space — `old-oid :mark` lines, no new OIDs.
+    let marks = std::fs::read_to_string(dir.join("commit-marks")).unwrap();
+    assert!(marks.contains(" :"), "mark-space entries present:\n{marks}");
+    // The commit-map is the pre-finalization view: identity run ⇒ old→old.
+    let cm = std::fs::read_to_string(dir.join("commit-map")).unwrap();
+    for line in cm.lines() {
+        let (old, new) = line.split_once(' ').unwrap();
+        assert_eq!(old, new, "identity run maps old to itself");
+    }
+
+    // Explicit override wins.
+    let custom = base.join("custom-artifacts");
+    let out2 = base.join("snap2.feat");
+    let mut d = PassDriver::with_endpoints(
+        Source::Repo(bare.clone()),
+        Sink::Stream(out2),
+    )
+    .unwrap()
+    .with_passes(vec![])
+    .unwrap()
+    .with_artifacts_dir(&custom)
+    .unwrap();
+    let report = d.run().unwrap();
+    assert_eq!(report.artifacts_dir.as_deref(), Some(custom.as_path()));
+    assert!(custom.join("commit-marks").exists());
+}
+
+#[test]
+fn stream_sink_artifacts_reflect_a_real_rewrite() {
+    // A stripping run: commit-marks records the marks; the report keeps
+    // the pass summaries; no repo is touched anywhere.
+    let bare = make_source_bare("art-rw");
+    let base = bare.parent().unwrap().to_path_buf();
+    std::fs::write(base.join("placeholder"), b"").unwrap();
+    let out = base.join("stripped.feat");
+
+    let mut d = PassDriver::with_endpoints(
+        Source::Repo(bare.clone()),
+        Sink::Stream(out.clone()),
+    )
+    .unwrap()
+    .with_passes(vec![PassSpec::StripBlobs(gfx::gfx_strip_blobs::StripBlobsConfig {
+        size_threshold: Some(3),
+        ..Default::default()
+    })])
+    .unwrap();
+    let report = d.run().unwrap();
+    assert!(report.commits_rewritten > 0);
+    let dir = base.join("stripped.feat.gfx");
+    assert!(dir.join("strip-report.txt").exists());
+    let marks = std::fs::read_to_string(dir.join("commit-marks")).unwrap();
+    assert!(marks.lines().filter(|l| !l.starts_with('#')).count() >= 2);
 }

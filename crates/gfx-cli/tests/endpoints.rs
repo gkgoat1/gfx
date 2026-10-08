@@ -189,3 +189,30 @@ fn cli_endpoint_flag_validation() {
     ]);
     assert_eq!(code, gfx_cli::EXIT_USAGE);
 }
+
+#[test]
+fn cli_gzip_round_trip() {
+    let bare = make_source_bare("cli-gz");
+    let base = bare.parent().unwrap().to_path_buf();
+    let stream = base.join("out.feat.gz");
+
+    // repo → file, auto-compressed by the .gz suffix.
+    let (code, report) = run_cli(&["--repo", bare.to_str().unwrap(), "--out", stream.to_str().unwrap()]);
+    assert_eq!(code, gfx_cli::EXIT_OK, "{report}");
+    let bytes = std::fs::read(&stream).unwrap();
+    assert_eq!(&bytes[..2], &[0x1f, 0x8b], "auto + .gz ⇒ gzip container");
+    assert!(base.join("out.feat.gz.gfx").join("commit-marks").exists());
+
+    // file(.gz, sniffed) → repo.
+    let dest = base.join("dest.git");
+    git(&base, &["init", "-q", "--bare", "dest.git"]);
+    let (code, report) = run_cli(&["--in", stream.to_str().unwrap(), "--repo", dest.to_str().unwrap()]);
+    assert_eq!(code, gfx_cli::EXIT_OK, "{report}");
+    assert_eq!(refs_snapshot(&dest), refs_snapshot(&bare));
+
+    // Bad flag values are usage errors.
+    let (code, _) = run_cli(&["--repo", bare.to_str().unwrap(), "--out", "/tmp/x.feat", "--out-compression", "bzip2"]);
+    assert_eq!(code, gfx_cli::EXIT_USAGE);
+    let (code, _) = run_cli(&["--repo", bare.to_str().unwrap(), "--out", "/tmp/x.feat", "--out-gzip-level", "42"]);
+    assert_eq!(code, gfx_cli::EXIT_USAGE);
+}
