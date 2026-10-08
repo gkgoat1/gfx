@@ -12,15 +12,32 @@ extern crate std;
 use std::ffi::OsString;
 use std::io::Write;
 
-use crate::args::{parse_argv, ArgSpec};
+use crate::args::{parse_argv, ArgMap, ArgSpec};
 use crate::error::CliError;
 use crate::registry::PassRegistry;
-use gfx::driver::PassDriver;
+use gfx::driver::{PassDriver, Sink, Source};
 
 /// Global flags every generated binary accepts.
 pub fn global_args() -> Vec<ArgSpec> {
     vec![
         ArgSpec::value("repo", Some("."), "repository to rewrite"),
+        ArgSpec::value(
+            "in",
+            None,
+            "read the fast-export stream from this file instead of exporting --repo \
+             (plan-stream-files.md; combine with --repo to import, with --out to filter)",
+        ),
+        ArgSpec::value(
+            "out",
+            None,
+            "write the transformed stream to this file instead of importing \
+             (combine with --repo to export, with --in to filter)",
+        ),
+        ArgSpec::value(
+            "artifacts",
+            None,
+            "artifact directory for stream sinks (default <out>.gfx/; meaningless with a repo sink)",
+        ),
         ArgSpec::flag("force", "override the fresh-clone safety check"),
         ArgSpec::flag(
             "save-remotes",
@@ -90,6 +107,8 @@ pub(crate) fn exit_code_for(e: &CliError) -> i32 {
         | CliError::PassOrder(_)
         | CliError::BadConfig { .. }
         | CliError::FlagConflict(_) => EXIT_USAGE,
+        // Endpoint validation failures are usage errors (C3).
+        CliError::Driver(gfx::driver::DriverError::Endpoint(_)) => EXIT_USAGE,
         CliError::Pack(gfx_pack::PackError::Usage(_)) => EXIT_USAGE,
         _ => EXIT_FAILURE,
     }
@@ -125,6 +144,13 @@ pub fn resolve_passes_checked(
                 "--{key} given but the blob-xform pass is not in --passes; content rewriting must never be silently skipped"
             )));
         }
+        if key.starts_with("enforce-ignore.")
+            && !passes.iter().any(|p| p.name() == "enforce-ignore")
+        {
+            return Err(CliError::FlagConflict(format!(
+                "--{key} given but the enforce-ignore pass is not in --passes; ignored-path enforcement must never be silently skipped"
+            )));
+        }
     }
 
     let mut remap_seen = false;
@@ -142,6 +168,67 @@ pub fn resolve_passes_checked(
         }
     }
     Ok(passes)
+}
+
+/// Resolve `--repo`/`--in`/`--out` into driver endpoints
+/// (plan-stream-files.md D1). All nonsensical combinations are usage
+/// errors here, before any file or repository is touched (C3):
+///
+/// | flags               | mode          |
+/// |---------------------|---------------|
+/// | `--repo R`          | repo → repo   |
+/// | `--repo R --out S`  | repo → file   |
+/// | `--in S --repo R`   | file → repo   |
+/// | `--in S1 --out S2`  | file → file   |
+/// | `--in` / `--out` alone | usage error |
+fn build_driver(map: &ArgMap) -> Result<PassDriver, CliError> {
+    let repo = map.value("repo");
+    let in_path = map.value("in");
+    let out_path = map.value("out");
+    // `--repo` counts as given only when the user actually passed it (the
+    // ArgMap fills its "." default otherwise).
+    let repo_given = map.flag("repo");
+
+    // Mode validation (usage errors, exit 2).
+    if in_path.is_some() && out_path.is_none() && !repo_given {
+        return Err(CliError::FlagConflict(
+            "--in alone is ambiguous: pass --repo <dest> to import the stream, or --out <file> to filter it"
+                .into(),
+        ));
+    }
+    if out_path.is_some() && in_path.is_none() && !repo_given {
+        return Err(CliError::FlagConflict(
+            "--out alone is ambiguous: pass --repo <src> to export it, or --in <file> to filter a stream"
+                .into(),
+        ));
+    }
+    if let (Some(a), Some(b)) = (in_path, out_path) {
+        if a == b {
+            return Err(CliError::FlagConflict(
+                "--in and --out name the same file".into(),
+            ));
+        }
+    }
+
+    let mut driver = match (in_path, out_path) {
+        (None, None) => PassDriver::new(std::path::Path::new(repo.unwrap_or(".")))?,
+        (None, Some(o)) => PassDriver::with_endpoints(
+            Source::Repo(std::path::PathBuf::from(repo.unwrap_or("."))),
+            Sink::Stream(std::path::PathBuf::from(o)),
+        )?,
+        (Some(i), None) => PassDriver::with_endpoints(
+            Source::Stream(std::path::PathBuf::from(i)),
+            Sink::Repo(std::path::PathBuf::from(repo.unwrap_or("."))),
+        )?,
+        (Some(i), Some(o)) => PassDriver::with_endpoints(
+            Source::Stream(std::path::PathBuf::from(i)),
+            Sink::Stream(std::path::PathBuf::from(o)),
+        )?,
+    };
+    if let Some(dir) = map.value("artifacts") {
+        driver = driver.with_artifacts_dir(std::path::PathBuf::from(dir))?;
+    }
+    Ok(driver)
 }
 
 fn try_run(
@@ -177,7 +264,7 @@ fn try_run(
                 map.value("remote-refs").unwrap_or("")
             ))
         })?;
-    let mut driver = PassDriver::new(std::path::Path::new(map.value("repo").unwrap_or(".")))?
+    let mut driver = build_driver(&map)?
         .with_passes(passes)?
         .force(map.flag("force"))
         .with_remote_data(

@@ -57,6 +57,8 @@ pub enum DriverError {
     Core(Error),
     /// Remote-data capture/restore failure (plan-remote-data.md).
     Remotes(crate::remotes::RemoteDataError),
+    /// Endpoint configuration is nonsensical (plan-stream-files.md D1/D3).
+    Endpoint(String),
 }
 
 impl fmt::Display for DriverError {
@@ -74,6 +76,7 @@ impl fmt::Display for DriverError {
             DriverError::Io(e) => write!(f, "i/o error: {e}"),
             DriverError::Core(e) => write!(f, "stream error: {e}"),
             DriverError::Remotes(e) => write!(f, "{e}"),
+            DriverError::Endpoint(msg) => write!(f, "invalid endpoints: {msg}"),
         }
     }
 }
@@ -241,6 +244,14 @@ pub struct RunReport {
     /// `--save-remotes` / `--restore-remotes` / a non-default
     /// `--remote-refs` policy was requested (plan-remote-data.md D8).
     pub remotes: Option<RemotesSummary>,
+    /// Stream source had no `original-oid` lines, so the commit map is a
+    /// presence list, not a true old→new map (plan-stream-files.md D5).
+    pub no_original_ids: bool,
+    /// The commit map is mark-finalized (new OIDs assigned by the
+    /// import). Always true today for repo sinks — the field exists so
+    /// later mark-space outputs (stream sinks, plan-stream-files.md D4)
+    /// can say `false` instead of lying about OIDs (C6).
+    pub commit_map_finalized: bool,
 }
 
 impl RunReport {
@@ -262,6 +273,10 @@ impl RunReport {
             self.commit_map.as_ref().map_or(0, |m| m.len())
         ));
         s.push_str(&format!("ref-map-entries: {}\n", self.ref_map.len()));
+        if self.no_original_ids {
+            s.push_str("warning: input stream carries no original-oid lines; \
+                the commit map is a presence list, not an old→new map\n");
+        }
         s.push_str("passes:\n");
         for p in &self.passes {
             s.push_str(&format!("  - {}: {}\n", p.name, p.detail));
@@ -290,17 +305,56 @@ impl RunReport {
     }
 }
 
-/// The pass driver. Construct with [`PassDriver::new`], configure with
-/// [`PassDriver::with_passes`] / [`PassDriver::force`], then
+/// Where a round reads its fast-export stream from
+/// (plan-stream-files.md D1). `Stream` is v1 endpoint plumbing only — the
+/// import side arrives with compression (M1), which reuses the same
+/// buffered read path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// `git fast-export` out of a repository (read-only).
+    Repo(PathBuf),
+    /// A fast-export stream file.
+    Stream(PathBuf),
+}
+
+/// Where a round writes its transformed stream (plan-stream-files.md D1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Sink {
+    /// `git fast-import` into a repository (the safety check binds here).
+    Repo(PathBuf),
+    /// A stream file (raw in v1; `.gz` lands with M1).
+    Stream(PathBuf),
+}
+
+/// Read a stream file into memory (buffered rounds, R2). Bytes pass
+/// through verbatim in v1 — gzip decode arrives with M1's magic sniff.
+pub fn read_stream(path: &Path) -> Result<Vec<u8>, DriverError> {
+    Ok(std::fs::read(path)?)
+}
+
+/// Write a stream file verbatim (buffered rounds, R2). The parent
+/// directory must exist (no implicit creation — a typo'd path is an
+/// error, not a tree of new directories).
+pub fn write_stream(path: &Path, bytes: &[u8]) -> Result<(), DriverError> {
+    Ok(std::fs::write(path, bytes)?)
+}
+
+/// The pass driver. Construct with [`PassDriver::new`] (repo → repo, as
+/// today) or [`PassDriver::with_endpoints`] (any combination), configure
+/// with [`PassDriver::with_passes`] / [`PassDriver::force`], then
 /// [`PassDriver::run`] or [`PassDriver::dry_run`].
 #[derive(Debug)]
 pub struct PassDriver {
-    repo: PathBuf,
+    source: Source,
+    sink: Sink,
     passes: Vec<PassSpec>,
     force: bool,
     save_remotes: bool,
     restore_remotes: bool,
     remote_refs: RemoteRefsPolicy,
+    /// Explicit artifact directory for stream sinks (D4). `None` =
+    /// `<out>.gfx/` next to the output file.
+    artifacts_dir: Option<PathBuf>,
 }
 
 impl PassDriver {
@@ -310,13 +364,93 @@ impl PassDriver {
         crate::git::process::git_dir(&repo)
             .map_err(|_| DriverError::NotARepository { path: repo.clone() })?;
         Ok(PassDriver {
-            repo,
+            source: Source::Repo(repo.clone()),
+            sink: Sink::Repo(repo),
             passes: Vec::new(),
             force: false,
             save_remotes: false,
             restore_remotes: false,
             remote_refs: RemoteRefsPolicy::default(),
+            artifacts_dir: None,
         })
+    }
+
+    /// Any source/sink combination (plan-stream-files.md D1). Repo
+    /// endpoints are verified to be repositories; the combination is
+    /// validated (C3: nonsense is a usage error before anything is read
+    /// or written).
+    pub fn with_endpoints(source: Source, sink: Sink) -> Result<Self, DriverError> {
+        let mut repo_endpoints: Vec<PathBuf> = Vec::new();
+        if let Source::Repo(p) = &source {
+            repo_endpoints.push(p.clone());
+        }
+        if let Sink::Repo(p) = &sink {
+            repo_endpoints.push(p.clone());
+        }
+        repo_endpoints.dedup();
+        for repo in repo_endpoints {
+            crate::git::process::git_dir(&repo)
+                .map_err(|_| DriverError::NotARepository { path: repo })?;
+        }
+        let d = PassDriver {
+            source,
+            sink,
+            passes: Vec::new(),
+            force: false,
+            save_remotes: false,
+            restore_remotes: false,
+            remote_refs: RemoteRefsPolicy::default(),
+            artifacts_dir: None,
+        };
+        d.validate_endpoints()?;
+        Ok(d)
+    }
+
+    /// Artifact directory override for stream sinks (plan-stream-files.md
+    /// D4). Meaningless (and an error) for repo sinks, whose artifacts
+    /// always live in `<gitdir>/gfx/`.
+    pub fn with_artifacts_dir(mut self, dir: impl Into<PathBuf>) -> Result<Self, DriverError> {
+        if matches!(self.sink, Sink::Repo(_)) {
+            return Err(DriverError::Endpoint(
+                "--artifacts is only meaningful with a stream sink (--out); \
+                 repo sinks always write <gitdir>/gfx/"
+                    .into(),
+            ));
+        }
+        self.artifacts_dir = Some(dir.into());
+        Ok(self)
+    }
+
+    /// C3/D1/D3 validation. Called at construction and again at run time
+    /// (remotes options can change after `with_endpoints`).
+    fn validate_endpoints(&self) -> Result<(), DriverError> {
+        // Same-file source and sink would destroy the input mid-round.
+        if let (Source::Stream(a), Sink::Stream(b)) = (&self.source, &self.sink) {
+            if a == b {
+                return Err(DriverError::Endpoint(
+                    "--in and --out name the same file".into(),
+                ));
+            }
+        }
+        let has_source_repo = matches!(self.source, Source::Repo(_));
+        let has_sink_repo = matches!(self.sink, Sink::Repo(_));
+        // Remotes flags bind to whichever endpoint is a real repo (D3).
+        if self.save_remotes && !has_source_repo {
+            return Err(DriverError::Endpoint(
+                "--save-remotes needs a repository source (there is nothing pre-existing to save from a stream)".into(),
+            ));
+        }
+        if self.restore_remotes && !has_sink_repo {
+            return Err(DriverError::Endpoint(
+                "--restore-remotes needs a repository sink (a stream file has no config to restore into)".into(),
+            ));
+        }
+        if self.remote_refs != RemoteRefsPolicy::Rewrite && !has_sink_repo {
+            return Err(DriverError::Endpoint(
+                "--remote-refs needs a repository sink (refs/remotes policy applies after an import)".into(),
+            ));
+        }
+        Ok(())
     }
 
     /// Remote-data options (plan-remote-data.md): snapshot the allowlisted
@@ -377,14 +511,20 @@ impl PassDriver {
         &self.passes
     }
 
+    /// The safety check binds to the *sink* (plan-stream-files.md D3,
+    /// R9): it guards the import, not the export. Stream sinks write a
+    /// file, which needs no repository safety gate.
     fn check_safety(&self) -> Result<(), DriverError> {
+        let Sink::Repo(repo) = &self.sink else {
+            return Ok(());
+        };
         if self.force {
             return Ok(());
         }
-        if crate::git::process::is_bare(&self.repo)? {
+        if crate::git::process::is_bare(repo)? {
             return Ok(());
         }
-        let dirty = !crate::git::process::status_porcelain(&self.repo)?.is_empty();
+        let dirty = !crate::git::process::status_porcelain(repo)?.is_empty();
         Err(DriverError::Unsafe {
             reason: if dirty {
                 "repository is non-bare and has uncommitted changes".into()
@@ -402,6 +542,7 @@ impl PassDriver {
     /// The full round (§4.3): safety check, export, passes, import, marks
     /// finalization, ref-map snapshot, artifacts.
     pub fn run(&mut self) -> Result<RunReport, DriverError> {
+        self.validate_endpoints()?;
         self.check_safety()?;
         self.round(true)
     }
@@ -412,17 +553,31 @@ impl PassDriver {
         // (they report what a real run would save, but write nothing).
         let want_capture = self.save_remotes || self.restore_remotes;
         let captured = if want_capture {
-            Some(crate::remotes::capture(&self.repo)?)
+            let Source::Repo(repo) = &self.source else {
+                // validate_endpoints() rejects this; belt and braces.
+                return Err(DriverError::Endpoint(
+                    "--save-remotes/--restore-remotes need a repository source".into(),
+                ));
+            };
+            Some(crate::remotes::capture(repo)?)
         } else {
             None
         };
         let saved_refs = if self.remote_refs == RemoteRefsPolicy::Pin {
-            crate::remotes::capture_remote_refs(&self.repo)?
+            let Sink::Repo(repo) = &self.sink else {
+                return Err(DriverError::Endpoint(
+                    "--remote-refs pin needs a repository sink".into(),
+                ));
+            };
+            crate::remotes::capture_remote_refs(repo)?
         } else {
             Vec::new()
         };
 
-        let input = crate::git::process::export_stream(&self.repo, &[])?;
+        let input = match &self.source {
+            Source::Repo(repo) => crate::git::process::export_stream(repo, &[])?,
+            Source::Stream(path) => read_stream(path)?,
+        };
         let mut out = transform_stream(&input, &self.passes)?;
 
         let mut report = RunReport {
@@ -437,6 +592,8 @@ impl PassDriver {
             ref_map: Vec::new(),
             artifacts_dir: None,
             remotes: None,
+            no_original_ids: out.no_original_ids,
+            commit_map_finalized: false,
         };
 
         // Populate the capture side of the remotes summary (dry runs stop
@@ -459,12 +616,24 @@ impl PassDriver {
             return Ok(report);
         }
 
+        // Stream sink (plan-stream-files.md): write the output bytes and
+        // stop — no import, no ref-map, no artifacts (D4's artifact
+        // surface lands with the marks-aware M1).
+        if let Sink::Stream(path) = &self.sink {
+            write_stream(path, &out.output)?;
+            return Ok(report);
+        }
+        let Sink::Repo(sink_repo) = &self.sink else {
+            unreachable!("stream sink returned above")
+        };
+
         // Import, then finalize remap from fast-import's marks (mode A).
-        let gitdir = crate::git::process::git_dir(&self.repo)?;
+        let gitdir = crate::git::process::git_dir(sink_repo)?;
         let gfx_dir = gitdir.join("gfx");
         std::fs::create_dir_all(&gfx_dir)?;
         let marks_path = gfx_dir.join("marks.out");
-        crate::git::process::import_stream(&self.repo, &out.output, &marks_path)?;
+        crate::git::process::import_stream(sink_repo, &out.output, &marks_path)?;
+        report.commit_map_finalized = true;
 
         #[cfg(feature = "remap")]
         if let Some(r) = out.remap.as_mut() {
@@ -476,8 +645,8 @@ impl PassDriver {
 
         // Ref-map: full before/after snapshot (complete even for refs only
         // bound by commit commands, which remap does not track).
-        let before = crate::git::process::refs(&self.repo)?;
-        let after = crate::git::process::refs(&self.repo)?;
+        let before = crate::git::process::refs(sink_repo)?;
+        let after = crate::git::process::refs(sink_repo)?;
         let after_map: std::collections::BTreeMap<&str, &str> =
             after.iter().map(|(o, n)| (n.as_str(), o.as_str())).collect();
         report.ref_map = before
@@ -496,7 +665,7 @@ impl PassDriver {
         if let Some(cap) = &captured {
             if self.restore_remotes {
                 let rr = crate::remotes::restore(
-                    &self.repo,
+                    sink_repo,
                     &cap.state,
                     crate::remotes::RestoreMode::AddMissing,
                 )?;
@@ -508,7 +677,7 @@ impl PassDriver {
         match self.remote_refs {
             RemoteRefsPolicy::Rewrite => {}
             RemoteRefsPolicy::Drop => {
-                let n = crate::remotes::drop_remote_refs(&self.repo)?;
+                let n = crate::remotes::drop_remote_refs(sink_repo)?;
                 report
                     .remotes
                     .get_or_insert_with(|| RemotesSummary {
@@ -518,7 +687,7 @@ impl PassDriver {
                     .refs_affected = n;
             }
             RemoteRefsPolicy::Pin => {
-                let n = crate::remotes::pin_remote_refs(&self.repo, &saved_refs)?;
+                let n = crate::remotes::pin_remote_refs(sink_repo, &saved_refs)?;
                 report
                     .remotes
                     .get_or_insert_with(|| RemotesSummary {
@@ -569,6 +738,10 @@ pub struct TransformOutcome {
     pub passes: Vec<PassSummary>,
     pub commits_observed: usize,
     pub commits_rewritten: usize,
+    /// The input carried no `original-oid` lines (foreign stream;
+    /// plan-stream-files.md D5). The commit map then degenerates to a
+    /// presence list — hosts surface this, never silently.
+    pub no_original_ids: bool,
     /// Pre-finalization `old → new` view (unchanged commits map to
     /// themselves; rewritten ones to `None` until the caller finalizes).
     #[cfg(feature = "remap")]
@@ -644,7 +817,9 @@ pub fn transform_stream(
     // by fast-import and fails the import mid-stream — R3). The stream is
     // fully parsed here, so the max is one cheap scan over materialized
     // data (R4); inject `max + 1` before the stage runs.
+    #[cfg(feature = "blob-xform")]
     let mut blob_xform: Option<gfx_blob_xform::BlobXform> = None;
+    #[cfg(feature = "blob-xform")]
     if let Some(mut cfg) = blob_xform_cfg {
         if !cfg.path_rules.is_empty() {
             let max_mark = events
@@ -694,7 +869,6 @@ pub fn transform_stream(
     // D7): strip-blobs then judges post-transform sizes — a shrink can
     // save a blob from the knife, which is usually the desired reading.
     #[cfg(feature = "blob-xform")]
-    #[cfg(feature = "blob-xform")]
     let blob_xform_rules: Vec<gfx_blob_xform::PathRule> = passes
         .iter()
         .find_map(|p| match p {
@@ -702,7 +876,8 @@ pub fn transform_stream(
             _ => None,
         })
         .unwrap_or_default();
-    let mut blob_xform_report = None;
+    #[cfg(feature = "blob-xform")]
+    let mut blob_xform_report: Option<gfx_blob_xform::BlobXformReport> = None;
     #[cfg(feature = "blob-xform")]
     if let Some(x) = blob_xform.as_mut() {
         let mut next = Vec::new();
@@ -846,6 +1021,7 @@ pub fn transform_stream(
         passes: Vec::new(),
         commits_observed: 0,
         commits_rewritten: 0,
+        no_original_ids: false,
         #[cfg(feature = "remap")]
         commit_map: None,
         #[cfg(feature = "remap")]
@@ -899,6 +1075,12 @@ pub fn transform_stream(
             ),
         });
         out.commit_map = Some(r.commit_map());
+        // D5: a stream with zero original-oid lines degenerates the map.
+        out.no_original_ids = out.commits_observed > 0
+            && out
+                .commit_map
+                .as_ref()
+                .map_or(true, |m| m.is_empty());
     }
     #[cfg(feature = "remap")]
     {
