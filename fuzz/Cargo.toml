@@ -10,6 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 gfx-strip-blobs = { path = "../crates/gfx-strip-blobs" }
+gfx-ignore = { path = "../crates/gfx-ignore" }
 gfx-redact = { path = "../crates/gfx-redact" }
 gfx-core = { path = "../crates/gfx-core" }
 gfx-blob-xform = { path = "../crates/gfx-blob-xform" }
@@ -18,6 +19,13 @@ gfx-pack = { path = "../crates/gfx-pack" }
 [[bin]]
 name = "glob_match"
 path = "fuzz_targets/glob_match.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ignore_match"
+path = "fuzz_targets/ignore_match.rs"
 test = false
 doc = false
 bench = false

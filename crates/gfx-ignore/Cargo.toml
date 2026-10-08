@@ -1,0 +1,10 @@
+[package]
+name = "gfx-ignore"
+description = "gfx builtin support: no_std gitignore matcher (ruleset parsing + verdicts) for stream passes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+bstr = { workspace = true }

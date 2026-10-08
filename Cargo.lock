@@ -625,6 +625,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "gfx-ignore"
+version = "0.1.0"
+dependencies = [
+ "bstr",
+]
+
+[[package]]
 name = "gfx-pack"
 version = "0.1.0"
 dependencies = [
