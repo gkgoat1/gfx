@@ -127,6 +127,9 @@ pub enum PassSpec {
     /// Builtin: generic fallible blob rewriting (plan-blob-xform.md).
     #[cfg(feature = "blob-xform")]
     BlobXform(gfx_blob_xform::BlobXformConfig),
+    /// Builtin: retroactive `.gitignore` enforcement (plan-stream-files.md D6).
+    #[cfg(feature = "enforce-ignore")]
+    EnforceIgnore(gfx_enforce_ignore::EnforceIgnoreConfig),
 }
 
 impl PassSpec {
@@ -140,6 +143,8 @@ impl PassSpec {
             PassSpec::Redact(_) => "redact",
             #[cfg(feature = "blob-xform")]
             PassSpec::BlobXform(_) => "blob-xform",
+            #[cfg(feature = "enforce-ignore")]
+            PassSpec::EnforceIgnore(_) => "enforce-ignore",
         }
     }
 
@@ -796,6 +801,10 @@ fn write_pass_reports(dir: &Path, out: &TransformOutcome) -> Result<(), DriverEr
     if let Some(rr) = out.redact_report.as_ref() {
         std::fs::write(dir.join("redact-map.txt"), rr.to_text())?;
     }
+    #[cfg(feature = "enforce-ignore")]
+    if let Some(ir) = out.ignore_report.as_ref() {
+        std::fs::write(dir.join("ignore-report.txt"), ir.to_text())?;
+    }
     Ok(())
 }
 
@@ -895,6 +904,8 @@ pub struct TransformOutcome {
     /// Path rules the report's per-rule counters correspond to (D9).
     #[cfg(feature = "blob-xform")]
     pub blob_xform_rules: Vec<gfx_blob_xform::PathRule>,
+    #[cfg(feature = "enforce-ignore")]
+    pub ignore_report: Option<gfx_enforce_ignore::IgnoreReport>,
 }
 
 /// Parse `input` and run `passes` over it in pipeline order. Assumes the
@@ -915,6 +926,8 @@ pub fn transform_stream(
     let mut redact: Option<gfx_redact::Redact> = None;
     #[cfg(feature = "blob-xform")]
     let mut blob_xform_cfg: Option<gfx_blob_xform::BlobXformConfig> = None;
+    #[cfg(feature = "enforce-ignore")]
+    let mut enforce_ignore: Option<gfx_enforce_ignore::EnforceIgnore> = None;
     for p in passes {
         match p {
             #[cfg(feature = "remap")]
@@ -928,6 +941,10 @@ pub fn transform_stream(
             #[cfg(feature = "blob-xform")]
             PassSpec::BlobXform(cfg) => {
                 blob_xform_cfg = Some(cfg.clone());
+            }
+            #[cfg(feature = "enforce-ignore")]
+            PassSpec::EnforceIgnore(cfg) => {
+                enforce_ignore = Some(gfx_enforce_ignore::EnforceIgnore::new(cfg.clone()))
             }
         }
     }
@@ -1036,6 +1053,22 @@ pub fn transform_stream(
         s.finish(&mut next)?;
         events = next;
         strip_report = Some(s.report().clone());
+    }
+
+    // Enforce-ignore stage: after strip-blobs (which decides content),
+    // before redact (which decides metadata) — path selection completes
+    // first (plan-stream-files.md D6).
+    #[cfg(feature = "enforce-ignore")]
+    let mut ignore_report = None;
+    #[cfg(feature = "enforce-ignore")]
+    if let Some(ei) = enforce_ignore.as_mut() {
+        let mut next = Vec::new();
+        for ev in events.drain(..) {
+            ei.apply(ev, &mut next)?;
+        }
+        ei.finish(&mut next)?;
+        events = next;
+        ignore_report = Some(ei.report().clone());
     }
 
     // Redact stage: rewrites surviving commits'/tags' metadata (plan
@@ -1170,6 +1203,8 @@ pub fn transform_stream(
         blob_xform_report,
         #[cfg(feature = "blob-xform")]
         blob_xform_rules,
+        #[cfg(feature = "enforce-ignore")]
+        ignore_report,
     };
 
     // Per-pass summaries + pre-finalization map (in pipeline order:
@@ -1186,6 +1221,13 @@ pub fn transform_stream(
         out.passes.push(PassSummary {
             name: "strip-blobs",
             detail: s.report().summary_text(),
+        });
+    }
+    #[cfg(feature = "enforce-ignore")]
+    if let Some(r) = out.ignore_report.as_ref() {
+        out.passes.push(PassSummary {
+            name: "enforce-ignore",
+            detail: r.summary_text(),
         });
     }
     #[cfg(feature = "redact")]

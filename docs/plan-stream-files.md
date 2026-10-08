@@ -2,7 +2,7 @@
 
 |            |                                                                    |
 |------------|--------------------------------------------------------------------|
-| Status     | In progress (M0–M1 done)                                           |
+| Status     | In progress (M0–M3 done)                                           |
 | Created    | 2026-10-08                                                         |
 | Updated    | 2026-10-08 (M0)                                                    |
 | Depends on | [plan-pass-driver-strip-blobs.md](plan-pass-driver-strip-blobs.md) §4 (driver), [plan-fast-export.md](plan-fast-export.md) §5–§7 (architecture, remap), [plan-redact-idents.md](plan-redact-idents.md) (redact pass), [plan-remote-data.md](plan-remote-data.md) (remotes policies), [rewrite-cli.md](rewrite-cli.md) (CLI surface) |
@@ -348,13 +348,15 @@ byte-identical.
       per D6, property tests against `git check-ignore` fixtures (host
       side generates cases: temp repo, patterns × paths, compare verdict
       and winning rule), `bstr`-clean byte paths, fuzz target extended.
-- [ ] **M3 — `enforce-ignore` pass, external rules.** Transform +
-      `--enforce-ignore.rules`; drop-first semantics, C8 carrier
-      protection, report entries (path, winning rule, commit mark);
-      compose-after-strip-blobs and before-remap ordering enforced by the
-      existing pipeline contract. Tests: history with tracked `*.log` /
-      `build/` artifacts → dropped per supplied rules; nested-rule cases;
-      negation cases; protected `.gitignore` survives.
+- [x] **M3 — `enforce-ignore` pass, external rules.** New
+      `gfx-enforce-ignore` crate (drop-first M; kept-D validity via the
+      vindex rewritten view; `C`/`R` judged both sides; zero-op commits
+      kept and counted; C8 `.gitignore` carriers never dropped), wired as
+      `PassSpec::EnforceIgnore` after strip-blobs / before redact, CLI
+      `--enforce-ignore.rules <file>` (repeatable, host-read, opt-in —
+      not in the default `--passes`), unused-flag guard, and
+      `ignore-report.txt` artifacts. Tests: crate units + CLI E2E
+      (in-place and repo→file→repo) pinning exact path sets and fsck.
 - [ ] **M4 — `--enforce-ignore.stream-rules`.** Mark-keyed per-commit
       rule-state propagation (D6/R8). Tests: `.gitignore` added
       mid-history (drops only after introduction), edited (rule change

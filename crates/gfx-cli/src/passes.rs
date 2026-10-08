@@ -479,3 +479,61 @@ impl PassFactory for BlobXformFactory {
         }))
     }
 }
+
+// ---------------------------------------------------------------------------
+// enforce-ignore (plan-stream-files.md D6)
+
+/// Builtin: retroactive `.gitignore` enforcement. Flags:
+///
+/// ```text
+/// --enforce-ignore.rules <file>   gitignore-format rules, root-anchored
+///                                 from stream start (repeatable)
+/// ```
+///
+/// Rule files are read by the host (this crate) and injected as bytes —
+/// the pass itself stays sans-IO (C1).
+pub struct EnforceIgnoreFactory;
+
+pub fn enforce_ignore_factory() -> Box<dyn PassFactory> {
+    Box::new(EnforceIgnoreFactory)
+}
+
+impl PassFactory for EnforceIgnoreFactory {
+    fn name(&self) -> &'static str {
+        "enforce-ignore"
+    }
+
+    fn in_default(&self) -> bool {
+        // Enforcement rewrites history contents; opt-in like redact (C7:
+        // default flows stay byte-identical to pre-M3 gfx).
+        false
+    }
+
+    fn arg_spec(&self) -> Vec<ArgSpec> {
+        vec![ArgSpec::multi(
+            "rules",
+            "gitignore-format rule file, applied root-anchored from stream start (repeatable)",
+        )]
+    }
+
+    fn build(&self, args: &ArgMap) -> Result<PassSpec, CliError> {
+        let mut external_rules = Vec::new();
+        for path in args.multi("enforce-ignore.rules") {
+            let bytes = std::fs::read(path)?;
+            external_rules.push(gfx::core::BString::from(bytes));
+        }
+        if external_rules.is_empty() {
+            return Err(CliError::FlagConflict(
+                "enforce-ignore needs at least one rule source \
+                 (--enforce-ignore.rules <file>); a pass with no rules is a no-op you didn't mean"
+                    .into(),
+            ));
+        }
+        Ok(PassSpec::EnforceIgnore(
+            gfx::gfx_enforce_ignore::EnforceIgnoreConfig {
+                external_rules,
+                ..Default::default()
+            },
+        ))
+    }
+}

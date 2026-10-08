@@ -1,0 +1,16 @@
+[package]
+name = "gfx-enforce-ignore"
+description = "gfx builtin: enforce gitignore rules retroactively over fast-export streams (drop ignored paths from history)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gfx-core = { workspace = true }
+gfx-ignore = { workspace = true }
+gfx-vindex = { workspace = true }
+bstr = { workspace = true }
+
+[dev-dependencies]
+gfx-core = { workspace = true, features = ["test-kit"] }

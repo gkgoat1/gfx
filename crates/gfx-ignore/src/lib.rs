@@ -172,6 +172,8 @@ pub struct Deciding {
     /// internal; this is the matched body).
     pub pattern: BString,
     pub negated: bool,
+    /// The pattern was directories-only (`foo/`).
+    pub dir_only: bool,
 }
 
 /// A stacked set of rule files (outermost first). Immutably shareable:
@@ -236,6 +238,7 @@ impl Ruleset {
                     file_dir: file.dir.clone(),
                     pattern: rule.pattern.clone(),
                     negated: rule.negated,
+                    dir_only: rule.dir_only,
                 }),
             },
         }
@@ -409,14 +412,16 @@ fn match_class(pat: &[u8], pi: usize, b: u8) -> Option<usize> {
 /// Debug rendering for reports: `dir:pattern` (root dir renders empty).
 pub fn describe(d: &Deciding) -> String {
     let bang = if d.negated { "!" } else { "" };
+    let slash = if d.dir_only { "/" } else { "" };
     if d.file_dir.is_empty() {
-        alloc::format!("{}{}", bang, String::from_utf8_lossy(&d.pattern))
+        alloc::format!("{}{}{}", bang, String::from_utf8_lossy(&d.pattern), slash)
     } else {
         alloc::format!(
-            "{}:{}{}",
+            "{}:{}{}{}",
             String::from_utf8_lossy(&d.file_dir),
             bang,
-            String::from_utf8_lossy(&d.pattern)
+            String::from_utf8_lossy(&d.pattern),
+            slash
         )
     }
 }

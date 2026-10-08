@@ -7,7 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-gfx = { workspace = true, features = ["std", "git", "remap", "strip-blobs", "redact", "blob-xform"] }
+gfx = { workspace = true, features = ["std", "git", "remap", "strip-blobs", "redact", "blob-xform", "enforce-ignore"] }
 gfx-strip-blobs = { workspace = true }
 gfx-pack = { workspace = true }
 toml = { version = "0.8", features = ["parse"] }

@@ -4,6 +4,7 @@ exclude = ["fuzz"]
 members = [
     "crates/gfx-blob-xform",
     "crates/gfx-ignore",
+    "crates/gfx-enforce-ignore",
     "crates/gfx-cli",
     "crates/gfx-pack",
     "crates/gfx-redact",
@@ -27,6 +28,7 @@ bstr = { version = "1", default-features = false, features = ["alloc"] }
 flate2 = "1"
 gfx-core = { path = "crates/gfx-core" }
 gfx-ignore = { path = "crates/gfx-ignore" }
+gfx-enforce-ignore = { path = "crates/gfx-enforce-ignore" }
 gfx = { path = "crates/gfx" }
 gfx-hash = { path = "crates/gfx-hash" }
 gfx-remap = { path = "crates/gfx-remap" }
