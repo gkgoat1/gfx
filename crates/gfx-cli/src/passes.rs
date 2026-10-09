@@ -510,10 +510,16 @@ impl PassFactory for EnforceIgnoreFactory {
     }
 
     fn arg_spec(&self) -> Vec<ArgSpec> {
-        vec![ArgSpec::multi(
-            "rules",
-            "gitignore-format rule file, applied root-anchored from stream start (repeatable)",
-        )]
+        vec![
+            ArgSpec::multi(
+                "rules",
+                "gitignore-format rule file, applied root-anchored from stream start (repeatable)",
+            ),
+            ArgSpec::flag(
+                "stream-rules",
+                "also track .gitignore blobs carried by the stream itself (per-commit, first-parent inheritance)",
+            ),
+        ]
     }
 
     fn build(&self, args: &ArgMap) -> Result<PassSpec, CliError> {
@@ -522,16 +528,19 @@ impl PassFactory for EnforceIgnoreFactory {
             let bytes = std::fs::read(path)?;
             external_rules.push(gfx::core::BString::from(bytes));
         }
-        if external_rules.is_empty() {
+        let stream_rules = args.flag("enforce-ignore.stream-rules");
+        if external_rules.is_empty() && !stream_rules {
             return Err(CliError::FlagConflict(
                 "enforce-ignore needs at least one rule source \
-                 (--enforce-ignore.rules <file>); a pass with no rules is a no-op you didn't mean"
+                 (--enforce-ignore.rules <file> and/or --enforce-ignore.stream-rules); \
+                 a pass with no rules is a no-op you didn't mean"
                     .into(),
             ));
         }
         Ok(PassSpec::EnforceIgnore(
             gfx::gfx_enforce_ignore::EnforceIgnoreConfig {
                 external_rules,
+                stream_rules,
                 ..Default::default()
             },
         ))

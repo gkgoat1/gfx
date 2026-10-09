@@ -193,14 +193,37 @@ impl Ruleset {
         self.files.iter().map(|f| f.rules.len()).sum()
     }
 
-    /// Push a rule file anchored at `dir` (empty = root). The caller
-    /// orders the stack: external rules first, then root, then deeper
-    /// directories (last match wins across the whole stack).
+    /// Push a rule file anchored at `dir` (empty = root). The stack keeps
+    /// git's ordering invariant — shallower directories before deeper
+    /// ones (deeper files override) — regardless of insertion order;
+    /// files at the same depth keep insertion order (stable).
     pub fn push_file(&mut self, dir: impl Into<BString>, rules: Vec<Rule>) {
-        self.files.push(RuleFile {
-            dir: dir.into(),
-            rules,
-        });
+        let dir = dir.into();
+        let depth = dir.iter().filter(|&&b| b == b'/').count();
+        let pos = self
+            .files
+            .iter()
+            .rposition(|f| f.dir.iter().filter(|&&b| b == b'/').count() <= depth)
+            .map_or(0, |i| i + 1);
+        self.files.insert(pos, RuleFile { dir, rules });
+    }
+
+    /// Replace the rule file anchored at `dir`, keeping its stack
+    /// position (a `.gitignore` at that directory was modified); appends
+    /// in depth order when absent (the file appeared for the first time).
+    pub fn upsert_file(&mut self, dir: impl Into<BString>, rules: Vec<Rule>) {
+        let dir = dir.into();
+        if let Some(f) = self.files.iter_mut().find(|f| f.dir == dir) {
+            f.rules = rules;
+        } else {
+            self.push_file(dir, rules);
+        }
+    }
+
+    /// Drop the rule file anchored at `dir` (the `.gitignore` there was
+    /// deleted). No-op when absent.
+    pub fn remove_dir(&mut self, dir: &[u8]) {
+        self.files.retain(|f| f.dir.as_slice() != dir);
     }
 
     /// A ruleset with this file appended (copy-on-write helper for
@@ -209,6 +232,15 @@ impl Ruleset {
         let mut next = self.clone();
         next.push_file(dir, rules);
         next
+    }
+
+    /// `self`'s files followed by `other`'s (last match wins ⇒ `other`
+    /// has the final say). The pass composes `stream_state.combined(external)`
+    /// so operator-supplied rules override in-tree ones.
+    pub fn combined(&self, other: &Ruleset) -> Ruleset {
+        let mut out = self.clone();
+        out.files.extend(other.files.iter().cloned());
+        out
     }
 
     /// Judge `path` (repo-root-relative, `/`-separated, no leading slash)

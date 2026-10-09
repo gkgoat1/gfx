@@ -2,7 +2,7 @@
 
 |            |                                                                    |
 |------------|--------------------------------------------------------------------|
-| Status     | In progress (M0–M3 done)                                           |
+| Status     | In progress (M0–M4 done)                                           |
 | Created    | 2026-10-08                                                         |
 | Updated    | 2026-10-08 (M0)                                                    |
 | Depends on | [plan-pass-driver-strip-blobs.md](plan-pass-driver-strip-blobs.md) §4 (driver), [plan-fast-export.md](plan-fast-export.md) §5–§7 (architecture, remap), [plan-redact-idents.md](plan-redact-idents.md) (redact pass), [plan-remote-data.md](plan-remote-data.md) (remotes policies), [rewrite-cli.md](rewrite-cli.md) (CLI surface) |
@@ -357,12 +357,18 @@ byte-identical.
       not in the default `--passes`), unused-flag guard, and
       `ignore-report.txt` artifacts. Tests: crate units + CLI E2E
       (in-place and repo→file→repo) pinning exact path sets and fsck.
-- [ ] **M4 — `--enforce-ignore.stream-rules`.** Mark-keyed per-commit
-      rule-state propagation (D6/R8). Tests: `.gitignore` added
-      mid-history (drops only after introduction), edited (rule change
-      takes effect), deleted (enforcement stops), per-directory files
-      (subtree scoping), merge commits (first-parent rule), file → file
-      run with no external file.
+- [x] **M4 — `--enforce-ignore.stream-rules`.** Mark-keyed per-commit
+      rule-state propagation (D6/R8): each commit inherits its first
+      parent's stream-rule state (`Arc`-shared, copy-on-write), applies
+      its own `.gitignore` M/D ops (inline or blob-mark content; OID-
+      sourced content counted as `rules_unresolved`), and is judged
+      against the result layered under the external rules (operator
+      intent wins ties — `Ruleset::combined`). Resets re-seat ref state.
+      Own-tree semantics pinned: a mid-history `.gitignore` drops only
+      after introduction (enforcing rules onto earlier history is what
+      `--enforce-ignore.rules` is for). Tests: introduction/edit/delete,
+      nested-dir scoping, branch inheritance, external composition, and
+      CLI E2E incl. a no-repo file → file run.
 - [ ] **M5 — Collapse anonymization.** `RedactMode::Collapse`, CLI flags,
       audit/report adjustment (D7). Tests: every ident in a multi-author
       history collapses to one; report shows `idents_collapsed`, zero
