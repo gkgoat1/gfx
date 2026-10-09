@@ -384,7 +384,8 @@ byte-identical.
       artifacts + limitations rows. Export flags untouched (no
       git-baseline change needed). E2E: repo → file(.gz) → repo
       reproduces an in-place rewrite's refs and content exactly
-      (`stream_round_trip_reproduces_in_place_rewrite_refs`). Fuzz:
+      (`stream_round_trip_reproduces_in_place_rewrite_refs`, including
+      the strict commit-map check). Fuzz:
       `enforce_ignore_roundtrip` (fuzzed rules + stream through the
       pass) joins the existing `ignore_match` totality target.
 

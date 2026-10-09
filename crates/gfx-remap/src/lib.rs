@@ -230,6 +230,18 @@ impl Remap {
     pub fn final_commit_map(&self) -> &CommitMap {
         &self.final_map
     }
+
+    /// Mode A finalization for **stream inputs** (plan-stream-files.md):
+    /// every commit's new OID comes from the import marks file.
+    /// "Unchanged in this round" does not imply "same OID" when the
+    /// stream itself was transformed upstream — the content-addressed
+    /// truth is in the marks file, not in `original-oid`.
+    pub fn finalize_from_marks_strict(&mut self, marks: &MarkFile) -> MapStats {
+        for (old, mark) in self.old_to_mark.iter() {
+            self.final_map.insert(*old, marks.get(*mark).copied());
+        }
+        self.stats()
+    }
 }
 
 impl gfx_core::Transform for Remap {

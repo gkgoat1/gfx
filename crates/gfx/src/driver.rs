@@ -714,7 +714,15 @@ impl PassDriver {
         if let Some(r) = out.remap.as_mut() {
             let marks_bytes = std::fs::read(&marks_path)?;
             let marks = MarkFile::parse(&marks_bytes)?;
-            r.finalize_from_marks(&marks);
+            // Stream sources: an "unchanged in this round" commit may
+            // still have been transformed upstream, so its imported OID
+            // differs from `original-oid` — trust the marks file for
+            // every entry (plan-stream-files.md C6).
+            if matches!(self.source, Source::Stream(_)) {
+                r.finalize_from_marks_strict(&marks);
+            } else {
+                r.finalize_from_marks(&marks);
+            }
             report.commit_map = Some(r.final_commit_map().clone());
         }
 

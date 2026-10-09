@@ -512,4 +512,16 @@ fn stream_round_trip_reproduces_in_place_rewrite_refs() {
         git_text(&inplace, &["cat-file", "-p", "HEAD"]),
     );
     gfx::git::process::fsck(&dest).expect("fsck --strict");
+
+    // The stream was transformed upstream (strip rewrote every commit),
+    // so the file→repo commit-map must carry NO identity lines: every
+    // old OID maps to the OID the import actually assigned (strict
+    // finalization for stream sources).
+    let cm = std::fs::read_to_string(dest.join("gfx/commit-map")).unwrap();
+    assert!(!cm.is_empty());
+    for line in cm.lines() {
+        let (old, new) = line.split_once(' ').unwrap();
+        assert_ne!(old, new, "pre-transformed stream must not map old→old: {line}");
+        assert_ne!(new, "-", "every entry finalized: {line}");
+    }
 }
