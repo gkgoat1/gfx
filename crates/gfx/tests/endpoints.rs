@@ -455,3 +455,61 @@ fn stream_sink_artifacts_reflect_a_real_rewrite() {
     let marks = std::fs::read_to_string(dir.join("commit-marks")).unwrap();
     assert!(marks.lines().filter(|l| !l.starts_with('#')).count() >= 2);
 }
+
+// ---------------------------------------------------------------------------
+// M6: repo → file → repo reproduces an in-place rewrite exactly
+
+#[test]
+fn stream_round_trip_reproduces_in_place_rewrite_refs() {
+    // Same passes, same source: (a) rewrite a clone in place, (b) export
+    // → passes → file → import into a fresh repo. Final ref tips and the
+    // rewritten content must match exactly.
+    let bare = make_source_bare("rt");
+    let base = bare.parent().unwrap().to_path_buf();
+
+    // (a) in-place rewrite on a clone.
+    let inplace = base.join("inplace.git");
+    git(&base, &["clone", "-q", "--bare", "bare.git", "inplace.git"]);
+    let mut d = PassDriver::new(&inplace)
+        .unwrap()
+        .with_passes(vec![PassSpec::StripBlobs(gfx::gfx_strip_blobs::StripBlobsConfig {
+            size_threshold: Some(3),
+            ..Default::default()
+        })])
+        .unwrap();
+    d.run().unwrap();
+
+    // (b) stream round-trip from a pristine clone.
+    let via = base.join("via.git");
+    git(&base, &["clone", "-q", "--bare", "bare.git", "via.git"]);
+    let stream = base.join("rt.feat.gz");
+    let mut d = PassDriver::with_endpoints(
+        Source::Repo(via.clone()),
+        Sink::Stream(stream.clone()),
+    )
+    .unwrap()
+    .with_passes(vec![PassSpec::StripBlobs(gfx::gfx_strip_blobs::StripBlobsConfig {
+        size_threshold: Some(3),
+        ..Default::default()
+    })])
+    .unwrap();
+    d.run().unwrap();
+    // Source was not rewritten.
+    let pristine_head = git_text(&bare, &["rev-parse", "HEAD"]);
+    assert_eq!(git_text(&via, &["rev-parse", "HEAD"]), pristine_head);
+
+    let dest = base.join("dest.git");
+    git(&base, &["init", "-q", "--bare", "dest.git"]);
+    let mut d = PassDriver::with_endpoints(Source::Stream(stream), Sink::Repo(dest.clone()))
+        .unwrap()
+        .with_passes(vec![])
+        .unwrap();
+    d.run().unwrap();
+
+    assert_eq!(refs_snapshot(&dest), refs_snapshot(&inplace));
+    assert_eq!(
+        git_text(&dest, &["cat-file", "-p", "HEAD"]),
+        git_text(&inplace, &["cat-file", "-p", "HEAD"]),
+    );
+    gfx::git::process::fsck(&dest).expect("fsck --strict");
+}

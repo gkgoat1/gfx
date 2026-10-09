@@ -66,7 +66,12 @@ Global:
 
 | Flag | Meaning |
 |---|---|
-| `--repo <path>` | repository to rewrite (default `.`) |
+| `--repo <path>` | repository to rewrite in place (default `.`); with `--in`, the import destination; with `--out`, the export source |
+| `--in <file>` | read the fast-export stream from `<file>` instead of exporting (gzip is sniffed by magic bytes, never by name) |
+| `--out <file>` | write the transformed stream to `<file>` instead of importing |
+| `--artifacts <dir>` | artifact directory for stream sinks (default `<out>.gfx/`) |
+| `--out-compression auto\|none\|gzip` | stream output framing (default `auto`: a `.gz` suffix gzips) |
+| `--out-gzip-level <1-9>` | gzip level for stream output (default 6, pinned for reproducible bytes) |
 | `--passes <spec>` | comma-separated pass names in pipeline order (default `strip-blobs,remap`) |
 | `--force` | override the safety check |
 | `--dry-run` | no import, no ref changes, no artifacts |
@@ -75,6 +80,44 @@ Global:
 
 Pass flags are namespaced in composed binaries and flat in single-pass
 helpers; the flat form is accepted in composed binaries when unambiguous.
+
+## Stream endpoints (repo ⇄ file)
+
+`--in`/`--out` turn the round's ends into fast-export **stream files**
+(plan-stream-files.md) instead of live repositories — four combinations:
+
+| Invocation | Mode | Touches a repo? |
+|---|---|---|
+| `gfx --repo R` | repo → repo | rewrites R in place (as before) |
+| `gfx --repo R --out S` | repo → file | R read-only (no safety check needed) |
+| `gfx --in S --repo R` | file → repo | imports into R (bare / `--force` gate applies) |
+| `gfx --in S1 --out S2` | file → file | none — pure stream filter |
+
+```
+# Snapshot a repo's history, redacted, as one gzipped stream:
+gfx --repo work.git --out share.feat.gz \
+    --passes redact --redact.collapse --redact.time-mode zero
+
+# Materialize it on the far side:
+git init --bare dest.git
+gfx --in share.feat.gz --repo dest.git
+```
+
+- gzip is transparent on read (magic-byte sniff) and selected on write by
+  `--out-compression` (default `auto`: the `.gz` suffix decides).
+  Containers are deterministic: mtime 0, no name field, fixed OS byte,
+  pinned level — identical inputs give byte-identical files.
+- Stream-sink artifacts land in `<out>.gfx/` (or `--artifacts`): the
+  usual `run-report.txt` / pass reports, plus **`commit-marks`** — the
+  commit map in *mark space* (`old-oid :mark`). New OIDs only exist
+  after an import assigns them, so file outputs never fabricate them;
+  a later `--in S --repo R` import produces the final `commit-map` as
+  usual. Streams without `original-oid` lines (foreign exports) degrade
+  the map to a presence list and the report says so.
+- `--save-remotes` needs a repo source, `--restore-remotes` /
+  `--remote-refs` a repo sink; combining them with the wrong endpoint
+  shape is a usage error (exit 2), as are `--in` or `--out` alone and
+  `--in == --out`.
 
 ### strip-blobs
 
@@ -109,6 +152,42 @@ exported marks after the round. In v1, remap flags rewritten commits via
 `original-oid` bookkeeping — see the implementation note in
 [plan §5.5](plan-pass-driver-strip-blobs.md).
 
+### enforce-ignore
+
+Pass name `enforce-ignore`; **opt-in** (not in the default `--passes`).
+Drops file-modify ops for paths the active gitignore rules ignore —
+retroactive enforcement of rules the history should have followed
+(plan-stream-files.md D6). Drop-first: ignored `M` ops vanish; `D` ops
+are normalized against the rewritten tree; `C`/`R` touching an ignored
+path on either side are dropped; commits left with zero ops are kept
+(and counted). `.gitignore` files themselves are never dropped — they
+are the rule carriers.
+
+| Flag | Meaning |
+|---|---|
+| `--enforce-ignore.rules <file>` | gitignore-format rules, applied root-anchored from stream start (repeatable); operator rules win ties over stream-carried ones |
+| `--enforce-ignore.stream-rules` | also track the stream's own `.gitignore` blobs per commit (first-parent inheritance; a commit is judged by the rules of its own tree) |
+
+At least one rule source is required. Semantics worth knowing:
+
+- **Own-tree rule timing** (stream rules): a `.gitignore` added
+  mid-history only drops paths from the commits that contain it. To
+  enforce today's rules onto history that predates them, pass the file
+  explicitly via `--enforce-ignore.rules`.
+- The matcher implements gitignore(5) semantics (basename vs anchored
+  patterns, `dir/`, `!` negation, per-directory stacking, `**`
+  components) and is pinned against `git check-ignore` in tests.
+- `OID`-sourced `.gitignore` edits (incremental streams) can't be
+  resolved from the stream; they are counted as `rules_unresolved` in
+  the report, never silently skipped.
+
+```
+gfx --repo work.git --passes enforce-ignore \
+    --enforce-ignore.rules .gitignore          # enforce today's rules everywhere
+gfx --in s.feat --out clean.feat \
+    --passes enforce-ignore --enforce-ignore.stream-rules
+```
+
 ### redact
 
 Pass name `redact`; registered in the composed `gfx` binary but **not in
@@ -119,8 +198,10 @@ leaves behind).
 
 | Flag | Meaning |
 |---|---|
-| `--redact.map <toml>` | exact `[[row]]` mappings (`name?`, `email?` wildcards, `new_name`, `new_email`); mutually exclusive with `--redact.pseudonymize` |
+| `--redact.map <toml>` | exact `[[row]]` mappings (`name?`, `email?` wildcards, `new_name`, `new_email`); mutually exclusive with `--redact.pseudonymize` / `--redact.collapse` |
 | `--redact.pseudonymize` | replace every ident with a deterministic pseudonym |
+| `--redact.collapse` | replace **every** ident with one name+email (full anonymization; report reads `collapse=1 idents_collapsed=N`, no collision audit) |
+| `--redact.collapse-name <name>` / `--redact.collapse-email <email>` | collapse target (default `Anonymous <anonymous@example.invalid>`); require `--redact.collapse` |
 | `--redact.pseudonym-style ordinal\|hash` | `ordinal` (default): `User 1 <user1@example.invalid>`, derives nothing from input bytes, does not correlate across repos. `hash`: stable across repos but brute-forceable — convenience, not safety |
 | `--redact.time-mode preserve\|zero\|shift\|bucket\|fuzz` | `preserve` (default) keeps epochs; `zero` collapses the time axis; `shift <secs>` preserves order/intervals; `bucket day\|week\|month` floors in UTC; `fuzz` jitters within a window (order *not* monotone) |
 | `--redact.time-shift <secs>` | shift amount, e.g. `365d`, `2w`, or plain seconds |
@@ -316,6 +397,7 @@ After a successful round, `<gitdir>/gfx/` contains:
 | `ref-map` | `old-tip new-tip refname` (full before/after snapshot) |
 | `run-report.txt` | pass summaries, byte counts, identity flag |
 | `strip-report.txt` | strip totals + bounded per-op listing (`(divergent)` marks D1 divergences) |
+| `ignore-report.txt` | enforce-ignore totals + bounded per-drop listing with the winning rule (when the pass ran) |
 
 Artifacts are deterministic: identical runs on clones of the same source
 produce byte-identical files.
@@ -350,6 +432,12 @@ way (`examples/strip-blobs.rs`, `examples/remap.rs`).
 - blob-xform's `--blob-xform.cmd` runs `sh -c` per blob with a bounded
   stdout capture (64 MiB unless `--blob-xform.max-output-bytes` says less);
   no per-blob timeout — a hung command hangs the run.
+- Stream endpoints take filesystem paths only (no `-` for stdin/stdout).
+- File outputs carry the commit map in mark space (`commit-marks`); the
+  old→new OID map exists only after an import finalizes it.
+- Stream inputs ride in whole (`--in` is buffered like every round); a
+  stream's own `refs/remotes/*` resets are imported as-is (stream-side
+  remote-ref filtering is future work).
 
 - Buffered rounds: the export stream and event list live in memory.
 - Empty branches (refs with no commits) are dropped by the round-trip.

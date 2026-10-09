@@ -2,7 +2,7 @@
 
 |            |                                                                    |
 |------------|--------------------------------------------------------------------|
-| Status     | In progress (M0–M5 done)                                           |
+| Status     | Implemented (M0–M6)                                                |
 | Created    | 2026-10-08                                                         |
 | Updated    | 2026-10-08 (M0)                                                    |
 | Depends on | [plan-pass-driver-strip-blobs.md](plan-pass-driver-strip-blobs.md) §4 (driver), [plan-fast-export.md](plan-fast-export.md) §5–§7 (architecture, remap), [plan-redact-idents.md](plan-redact-idents.md) (redact pass), [plan-remote-data.md](plan-remote-data.md) (remotes policies), [rewrite-cli.md](rewrite-cli.md) (CLI surface) |
@@ -378,12 +378,15 @@ byte-identical.
       crate-level leak scan + audit replacement + time-mode composition;
       CLI E2E in-place and file → file with a custom target identity;
       flag-conflict usage errors.
-- [ ] **M6 — Docs + hardening.** `rewrite-cli.md` endpoints section
-      (four-modes table, artifact locations, mark-space caveat);
-      `docs/git-baseline.md` note if export flags are touched (they are
-      not); E2E: repo → file → repo reproduces the in-place rewrite's
-      refs exactly; fuzz: stream-file round-trips through gzip and
-      enforce-ignore.
+- [x] **M6 — Docs + hardening.** `rewrite-cli.md`: "Stream endpoints
+      (repo ⇄ file)" section (four-modes table, framing, artifacts,
+      mark-space caveat), `enforce-ignore` and collapse flag sections,
+      artifacts + limitations rows. Export flags untouched (no
+      git-baseline change needed). E2E: repo → file(.gz) → repo
+      reproduces an in-place rewrite's refs and content exactly
+      (`stream_round_trip_reproduces_in_place_rewrite_refs`). Fuzz:
+      `enforce_ignore_roundtrip` (fuzzed rules + stream through the
+      pass) joins the existing `ignore_match` totality target.
 
 ## Open questions
 
