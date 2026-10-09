@@ -196,6 +196,16 @@ impl PassFactory for RedactFactory {
         vec![
             ArgSpec::value("map", None, "TOML file of exact [[row]] ident mappings"),
             ArgSpec::flag("pseudonymize", "replace every ident with a deterministic pseudonym"),
+            ArgSpec::flag(
+                "collapse",
+                "replace every ident with one name+email (full anonymization; plan-stream-files.md D7)",
+            ),
+            ArgSpec::value("collapse-name", None, "collapse target name (default: Anonymous)"),
+            ArgSpec::value(
+                "collapse-email",
+                None,
+                "collapse target email (default: anonymous@example.invalid)",
+            ),
             ArgSpec::value(
                 "pseudonym-style",
                 None,
@@ -218,9 +228,21 @@ impl PassFactory for RedactFactory {
         // Ident mode (plan §5.1 rules).
         let map_path = args.value("redact.map");
         let pseudonymize = args.flag("redact.pseudonymize");
-        if map_path.is_some() && pseudonymize {
+        let collapse = args.flag("redact.collapse");
+        let chosen = [map_path.is_some(), pseudonymize, collapse]
+            .iter()
+            .filter(|b| **b)
+            .count();
+        if chosen > 1 {
             return Err(conflict(
-                "--redact.map and --redact.pseudonymize are mutually exclusive (table wins or generate-all, not both)",
+                "--redact.map, --redact.pseudonymize, and --redact.collapse are mutually exclusive (pick one ident policy)",
+            ));
+        }
+        let collapse_name = args.value("redact.collapse-name");
+        let collapse_email = args.value("redact.collapse-email");
+        if (collapse_name.is_some() || collapse_email.is_some()) && !collapse {
+            return Err(conflict(
+                "--redact.collapse-name/--redact.collapse-email require --redact.collapse",
             ));
         }
         let style_str = args.value("redact.pseudonym-style");
@@ -230,6 +252,14 @@ impl PassFactory for RedactFactory {
             ));
         }
         let ident_mode = match (map_path, pseudonymize) {
+            _ if collapse => IdentMode::Collapse {
+                name: gfx::core::BString::from(
+                    collapse_name.unwrap_or("Anonymous").as_bytes(),
+                ),
+                email: gfx::core::BString::from(
+                    collapse_email.unwrap_or("anonymous@example.invalid").as_bytes(),
+                ),
+            },
             (Some(path), false) => IdentMode::Table(parse_redact_map(path)?),
             (None, true) => IdentMode::Pseudonymize(match style_str.unwrap_or("ordinal") {
                 "ordinal" => PseudonymStyle::Ordinal,

@@ -1021,3 +1021,75 @@ fn m1_pseudonym_hash_stable_and_injective() {
         assert_eq!(c.author.as_ref().unwrap().email, c.committer.as_ref().unwrap().email);
     }
 }
+
+// ---------------------------------------------------------------- D7 collapse
+
+fn report_for(bytes: &[u8], cfg: RedactConfig) -> RedactReport {
+    let mut redact = Redact::new(cfg);
+    let mut parser = Parser::new(ParseOptions::default());
+    parser.feed(bytes);
+    let mut events = Vec::new();
+    while let Some(ev) = parser.next_event().expect("parse") {
+        redact.apply(ev, &mut events).expect("apply");
+    }
+    let mut tail = Vec::new();
+    parser.finish(&mut tail).expect("finish parse");
+    for ev in tail {
+        redact.apply(ev, &mut events).expect("apply tail");
+    }
+    redact.finish(&mut events).expect("finish");
+    redact.report()
+}
+
+#[test]
+fn collapse_maps_every_ident_to_one() {
+    let cfg = RedactConfig {
+        ident_mode: IdentMode::Collapse {
+            name: b("Anonymous"),
+            email: b("anonymous@example.invalid"),
+        },
+        ..RedactConfig::default()
+    };
+    let out = roundtrip(&stream_bytes(), cfg);
+    let text = String::from_utf8_lossy(&out);
+    assert!(text.contains("author Anonymous <anonymous@example.invalid>"), "{text}");
+    assert!(text.contains("committer Anonymous <anonymous@example.invalid>"));
+    assert!(text.contains("tagger Anonymous <anonymous@example.invalid>"));
+    for leak in ["alice@example.com", "bob@example.org", "tagr@example.net", "Alice", "Bob", "Tagr"] {
+        assert!(!text.contains(leak), "collapsed stream leaks {leak}");
+    }
+
+    // The audit is replaced, not alarmed: distinct originals counted, no
+    // collision entries (the collapse is intentional, D7).
+    let cfg2 = RedactConfig {
+        ident_mode: IdentMode::Collapse {
+            name: b("Anonymous"),
+            email: b("anonymous@example.invalid"),
+        },
+        ..RedactConfig::default()
+    };
+    let report = report_for(&stream_bytes(), cfg2);
+    // Alice (author+committer folds), Bob, Tagr.
+    assert_eq!(report.totals.idents_collapsed, 3, "distinct originals");
+    assert_eq!(report.totals.collisions, 0);
+    assert!(report.collisions.is_empty());
+    assert!(report.summary_text().contains("collapse=1 idents_collapsed=3"));
+    assert!(!report.summary_text().contains("collisions="));
+}
+
+#[test]
+fn collapse_composes_with_time_modes() {
+    let cfg = RedactConfig {
+        ident_mode: IdentMode::Collapse {
+            name: b("Anonymous"),
+            email: b("anonymous@example.invalid"),
+        },
+        time_mode: TimeMode::Zero,
+        ..RedactConfig::default()
+    };
+    let out = roundtrip(&stream_bytes(), cfg);
+    let text = String::from_utf8_lossy(&out);
+    assert!(text.contains("author Anonymous <anonymous@example.invalid> 0 +0000"), "{text}");
+    assert!(!text.contains("1700000000"), "times zeroed");
+    assert!(!text.contains("+0200"), "offsets gone");
+}

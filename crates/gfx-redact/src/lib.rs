@@ -132,6 +132,11 @@ pub enum IdentMode {
     Injected(SharedPolicy),
     /// Built-in deterministic pseudonyms for every ident.
     Pseudonymize(PseudonymStyle),
+    /// Full collapse (plan-stream-files.md D7): *every* ident becomes the
+    /// one `(name, email)` pair — intentionally non-injective; the
+    /// report's injectivity audit is suppressed and replaced by
+    /// `idents_collapsed` (distinct originals folded away).
+    Collapse { name: BString, email: BString },
 }
 
 impl IdentMode {
@@ -143,6 +148,7 @@ impl IdentMode {
             IdentMode::Injected(_) => "injected",
             IdentMode::Pseudonymize(PseudonymStyle::Ordinal) => "ordinal",
             IdentMode::Pseudonymize(PseudonymStyle::Hash) => "hash",
+            IdentMode::Collapse { .. } => "collapse",
         }
     }
 }
@@ -302,6 +308,9 @@ pub struct RedactTotals {
     pub ident_updates: u64,
     /// Injectivity collisions reported.
     pub collisions: usize,
+    /// Collapse mode (D7): distinct originals folded into the single
+    /// replacement. Zero in every other mode.
+    pub idents_collapsed: u64,
     /// Replacements containing original ident bytes (deterministic substring
     /// check; plan §4.9 "suspicious-replacement").
     pub suspicious: usize,
@@ -322,15 +331,26 @@ pub struct RedactReport {
 
 impl RedactReport {
     /// One-line deterministic summary for the driver's run report.
+    /// Collapse runs say so instead of reporting a collision count (D7).
     pub fn summary_text(&self) -> String {
-        format!(
-            "idents_redacted={} ident_updates={} collisions={} suspicious={} times_altered={}",
-            self.totals.idents_redacted,
-            self.totals.ident_updates,
-            self.totals.collisions,
-            self.totals.suspicious,
-            self.totals.times_altered,
-        )
+        if self.totals.idents_collapsed > 0 {
+            format!(
+                "collapse=1 idents_collapsed={} ident_updates={} suspicious={} times_altered={}",
+                self.totals.idents_collapsed,
+                self.totals.ident_updates,
+                self.totals.suspicious,
+                self.totals.times_altered,
+            )
+        } else {
+            format!(
+                "idents_redacted={} ident_updates={} collisions={} suspicious={} times_altered={}",
+                self.totals.idents_redacted,
+                self.totals.ident_updates,
+                self.totals.collisions,
+                self.totals.suspicious,
+                self.totals.times_altered,
+            )
+        }
     }
 
     /// The `redact-map.txt` artifact. Deterministic: identical run
@@ -450,22 +470,34 @@ impl Redact {
             e.roles.dedup();
         }
 
-        let collisions = self
-            .image
-            .iter()
-            .filter(|(_, originals)| originals.len() >= 2)
-            .map(|((n, e), originals)| CollisionEntry {
-                new_name: n.clone(),
-                new_email: e.clone(),
-                originals: originals.iter().cloned().collect(),
-            })
-            .collect::<Vec<_>>();
+        // D7: a total collapse is *intentionally* non-injective — the
+        // collision audit would be all-alarm, so it is suppressed and
+        // replaced by the idents_collapsed total.
+        let collapsing = matches!(self.cfg.ident_mode, IdentMode::Collapse { .. });
+        let collisions = if collapsing {
+            Vec::new()
+        } else {
+            self.image
+                .iter()
+                .filter(|(_, originals)| originals.len() >= 2)
+                .map(|((n, e), originals)| CollisionEntry {
+                    new_name: n.clone(),
+                    new_email: e.clone(),
+                    originals: originals.iter().cloned().collect(),
+                })
+                .collect::<Vec<_>>()
+        };
 
         let changed_entries = entries.iter().filter(|e| e.changed);
         let totals = RedactTotals {
             idents_redacted: changed_entries.clone().count() as u64,
             ident_updates: changed_entries.map(|e| e.uses).sum(),
             collisions: collisions.len(),
+            idents_collapsed: if collapsing {
+                entries.iter().filter(|e| e.changed).count() as u64
+            } else {
+                0
+            },
             suspicious: entries.iter().filter(|e| e.suspicious).count(),
             times_altered: self.times_altered,
         };
@@ -504,6 +536,9 @@ impl Redact {
                 IdentMode::Injected(p) => {
                     let out = p.0.rewrite(role, &ident);
                     (out.name, out.email, true)
+                }
+                IdentMode::Collapse { name, email } => {
+                    (name.clone(), email.clone(), true)
                 }
                 IdentMode::Pseudonymize(style) => {
                     let ordinal = match self.pseudonyms.get(&(

@@ -2,7 +2,7 @@
 
 |            |                                                                    |
 |------------|--------------------------------------------------------------------|
-| Status     | In progress (M0–M4 done)                                           |
+| Status     | In progress (M0–M5 done)                                           |
 | Created    | 2026-10-08                                                         |
 | Updated    | 2026-10-08 (M0)                                                    |
 | Depends on | [plan-pass-driver-strip-blobs.md](plan-pass-driver-strip-blobs.md) §4 (driver), [plan-fast-export.md](plan-fast-export.md) §5–§7 (architecture, remap), [plan-redact-idents.md](plan-redact-idents.md) (redact pass), [plan-remote-data.md](plan-remote-data.md) (remotes policies), [rewrite-cli.md](rewrite-cli.md) (CLI surface) |
@@ -369,11 +369,15 @@ byte-identical.
       `--enforce-ignore.rules` is for). Tests: introduction/edit/delete,
       nested-dir scoping, branch inheritance, external composition, and
       CLI E2E incl. a no-repo file → file run.
-- [ ] **M5 — Collapse anonymization.** `RedactMode::Collapse`, CLI flags,
-      audit/report adjustment (D7). Tests: every ident in a multi-author
-      history collapses to one; report shows `idents_collapsed`, zero
-      collision entries; composes with `--redact.time zero`; dry-run
-      works in file → file mode.
+- [x] **M5 — Collapse anonymization.** `IdentMode::Collapse { name,
+      email }` (D7) with CLI `--redact.collapse[`-name`/`-email`]
+      (default `Anonymous <anonymous@example.invalid>`); mutually
+      exclusive with `--redact.map`/`--redact.pseudonymize`. The
+      injectivity audit is suppressed for collapse runs and replaced by
+      `idents_collapsed` (report summary reads `collapse=1 …`). Tests:
+      crate-level leak scan + audit replacement + time-mode composition;
+      CLI E2E in-place and file → file with a custom target identity;
+      flag-conflict usage errors.
 - [ ] **M6 — Docs + hardening.** `rewrite-cli.md` endpoints section
       (four-modes table, artifact locations, mark-space caveat);
       `docs/git-baseline.md` note if export flags are touched (they are
