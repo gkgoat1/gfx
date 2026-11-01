@@ -1,6 +1,7 @@
 //! The default `gfx` binary: all compiled-in passes, plus the multistream
-//! subcommands (plan-multistream-pack.md). Dispatch: a leading `pack` (and
-//! later `unpack`) routes to the archive driver; anything else is the
+//! subcommands (plan-multistream-pack.md) and transfer subcommands
+//! (plan-transfer.md). Dispatch: a leading `pack`/`unpack`/`send`/`receive`
+//! routes to the archive/transfer drivers; anything else is the
 //! filter-repo-style rewrite surface, unchanged.
 
 fn factories() -> Vec<Box<dyn gfx_cli::PassFactory>> {
@@ -24,6 +25,12 @@ fn main() {
             argv.into_iter().skip(1),
         ),
         Some("unpack") => gfx_cli::run_unpack_cli_to(&mut std::io::stdout(), argv.into_iter().skip(1)),
+        Some("send") => gfx_cli::run_send_cli_to(
+            &mut std::io::stdout(),
+            factories(),
+            argv.into_iter().skip(1),
+        ),
+        Some("receive") => gfx_cli::run_receive_cli_to(&mut std::io::stdout(), argv.into_iter().skip(1)),
         _ => gfx_cli::run_rewrite_cli_to(
             &mut std::io::stdout(),
             "gfx",

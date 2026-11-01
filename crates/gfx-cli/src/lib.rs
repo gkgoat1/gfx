@@ -18,6 +18,9 @@ pub mod cmd;
 pub mod config;
 pub mod error;
 pub mod pack_cli;
+pub mod receive_cli;
+pub mod send_cli;
+pub mod transfer;
 pub mod passes;
 pub mod registry;
 pub mod unpack_cli;
@@ -28,6 +31,8 @@ pub use args::{parse_argv, ArgKind, ArgMap, ArgSpec};
 pub use cli::{resolve_passes_checked, run_rewrite_cli_to, EXIT_FAILURE, EXIT_OK, EXIT_USAGE};
 pub use error::CliError;
 pub use pack_cli::run_pack_cli_to;
+pub use receive_cli::run_receive_cli_to;
+pub use send_cli::run_send_cli_to;
 pub use unpack_cli::run_unpack_cli_to;
 pub use registry::{PassFactory, PassRegistry};
 

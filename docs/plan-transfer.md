@@ -2,9 +2,9 @@
 
 | Field    | Value |
 |----------|-------|
-| Status   | Proposed |
+| Status   | In progress (M0–M2 done) |
 | Created  | 2026-11-01 |
-| Updated  | 2026-11-01 |
+| Updated  | 2026-11-01 (M1+M2: transport core, both transports, mock loopbacks) |
 | Depends  | plan-multistream-pack.md (pack/unpack archives), plan-stream-files.md (stream endpoints), rewrite-cli.md, pack-cli.md |
 
 ---
@@ -177,15 +177,15 @@ by the same guard.
 Each milestone keeps the tree building and all prior tests green; commit
 after each.
 
-- **M0 — this plan.**
-- **M1 — transport core + wormhole.** `transfer.rs` in `gfx-cli`
+- **M0 — this plan.** ✓
+- **M1 — transport core + wormhole.** ✓ `transfer.rs` in `gfx-cli`
   (TransportKind, PATH discovery, argv construction, code-line parsing as
   pure functions), `send_cli.rs` / `receive_cli.rs`, dispatch in
   `bin/gfx.rs`, temp lifecycle (C3). Tests use **mock transport binaries**
   (shell scripts on a temp PATH that record argv and emulate the code
   line / file delivery) so no network is touched: full send→receive
   loopback of two fixture repos through a real `gfx pack`/`gfx unpack`.
-- **M2 — sendme transport + auto selection.** Same mock-binary loopback
+- **M2 — sendme transport + auto selection.** ✓ (landed with M1: the Transport abstraction covered both) Same mock-binary loopback
   for sendme semantics (cwd-relative receive, ticket parsing, serve-mode
   messaging, `--code` pinning rejected). Auto-order resolution test.
 - **M3 — live loopback + docs.** `scripts/transfer-loopback.sh` (opt-in,
