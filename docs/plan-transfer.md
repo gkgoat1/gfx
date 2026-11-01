@@ -2,9 +2,9 @@
 
 | Field    | Value |
 |----------|-------|
-| Status   | In progress (M0–M2 done) |
+| Status   | Implemented (M0–M3) |
 | Created  | 2026-11-01 |
-| Updated  | 2026-11-01 (M1+M2: transport core, both transports, mock loopbacks) |
+| Updated  | 2026-11-01 (M3: live wormhole loopback verified on real relay — see [transfer-cli.md](transfer-cli.md)) |
 | Depends  | plan-multistream-pack.md (pack/unpack archives), plan-stream-files.md (stream endpoints), rewrite-cli.md, pack-cli.md |
 
 ---
@@ -188,7 +188,7 @@ after each.
 - **M2 — sendme transport + auto selection.** ✓ (landed with M1: the Transport abstraction covered both) Same mock-binary loopback
   for sendme semantics (cwd-relative receive, ticket parsing, serve-mode
   messaging, `--code` pinning rejected). Auto-order resolution test.
-- **M3 — live loopback + docs.** `scripts/transfer-loopback.sh` (opt-in,
+- **M3 — live loopback + docs.** ✓ (real wormhole round-trip: plain + anonymized both verified) `scripts/transfer-loopback.sh` (opt-in,
   POSIX): real `wormhole` send/receive of a fixture repo on one machine,
   asserting refs survive; documented as needing network + LuLu approval.
   `docs/transfer-cli.md` user surface (flags, security notes C4/C6, LuLu
